@@ -38,7 +38,10 @@ main :: () {
         print("test.pointer:\n\t%\n", test.pointer.*);
     
         // When we pack the data and write to a file, we also specify a file path for the type info of the data.
-        pack_file_and_type_info("test.dat", "test.ti", test);
+        if !pack_file_and_type_info("test.dat", "test.ti", test) {
+            print("Failed to pack data!");
+            return;
+        }
     }
     
     

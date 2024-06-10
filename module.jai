@@ -21,9 +21,10 @@
 */
 
 // packs the given data and its type info and writes each to a separate file
-pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data: Any) {
-    write_entire_file(type_info_file_path, cast(string) pack_data(data.type));
-    write_entire_file(file_path,           cast(string) pack_data(data));
+pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data: Any) -> bool {
+    if !write_entire_file(type_info_file_path, cast(string) pack_data(data.type))  return false;
+    if !write_entire_file(file_path,           cast(string) pack_data(data)     )  return false;
+    return true;
 }
 
 // assumes that the given file @ type_info_file_path actually contains data that was serialized from a *Type_Info.
