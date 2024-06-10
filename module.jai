@@ -102,6 +102,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
                 data_offset += ti_array.element_type.runtime_size;
             }
             
+          case .BOOL;    #through;
           case .ENUM;    #through;
           case .INTEGER; #through;
           case .FLOAT;   
@@ -263,6 +264,8 @@ remap_data :: (dst: Any, src: Any) -> bool {
       case .STRING;
         (cast(*string) dst.value_pointer).* = copy_string((cast(*string) src.value_pointer).*);
         return true;
+
+      case .BOOL; #through;
     
       case .INTEGER;
         return dynamic_int_cast(dst, src);

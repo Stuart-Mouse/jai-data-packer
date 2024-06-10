@@ -13,6 +13,7 @@ main :: () {
             floating   : float;
             text       : string;
             enumerated : enum { A; B; C; D; };
+            boolean    : bool;
             pointer    : *Test_Struct;
         }
         
@@ -21,6 +22,7 @@ main :: () {
             numbers    = .[ 1, 2, 3, 4, 5 ],
             floating   = 52.5,
             text       = "lorem ipsum",
+            boolean    = true,
             enumerated = .C,
         };
         
@@ -51,16 +53,18 @@ main :: () {
             We now want to store numbers in a dynamic array instead of a fixed-length array, 
                 we upped the precision of 'floating' from a float to a float64,
                 and we reordered the values in 'enumerated'.
+            We also changed the order of the members in the struct.
             All of these changes will be handled automatically upon remapping the original file,
                 however if we were to change any of the names of the members, the values would not be mapped.
             In the future I plan to add some capability to define name remappings.
         */
         Test_Struct :: struct {
-            numbers    : [..] int;
-            floating   : float64;
-            text       : string;
             enumerated : enum { D; C; B; A; };
+            numbers    : [..] int;
+            text       : string;
+            floating   : float64;
             pointer    : *Test_Struct;
+            boolean    : bool;
         }
         
         // When we wrote the earlier version of our structure out to file, we also saved a type info file.
