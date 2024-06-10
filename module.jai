@@ -4,6 +4,54 @@
 #import "Hash_Table";
 
 
+/*
+    Notes about interface:
+
+    The current approach is to handle unpacking of the type info file and data file, and the data remapping all behind a single procedure call.
+    The primary reason for this is the somewhat complicated memory handling involved.
+    We have to read in 2 separate files and free the data after doing the remapping.
+    So I think it's just safer to do this all behind an API.
+    
+    If the user needs to load multiple files using the same dynamic type info, 
+        then they can probably surmise how to write such a procedure by copying from unpack_file_with_type_info().
+    
+    Another thing to consider is that we may provide some metaprogram functionality that gets all needed type info data into a single file.
+    Then we don't end up duplicating all of the common data structures in every single type info file.
+    
+*/
+
+// packs the given data and its type info and writes each to a separate file
+pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data: Any) {
+    write_entire_file(type_info_file_path, cast(string) pack_data(data.type));
+    write_entire_file(file_path,           cast(string) pack_data(data));
+}
+
+// assumes that the given file @ type_info_file_path actually contains data that was serialized from a *Type_Info.
+unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, data: Any) -> bool {
+    ti_file, ok := read_entire_file(type_info_file_path);
+    if !ok  return false;
+    defer free(ti_file);
+    
+    ti_any:, ok = unpack_data(
+        type_info(*Type_Info), 
+        cast(*[]u8) *ti_file
+    );
+    if !ok  return false;
+    
+    data_file:, ok = read_entire_file(file_path);
+    if !ok  return false;
+    defer free(data_file);
+    
+    data_any:, ok = unpack_data(
+        (cast(**Type_Info) ti_any.value_pointer).*,
+        cast(*[]u8) *data_file
+    );
+    if !ok  return false;
+    
+    return remap_data(data, data_any);
+}
+
+
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
 pack_data :: (data: Any) -> ([] u8, bool) {
     recurse :: (data: Any, buffer: *[] u8, write_offset: s64, pointer_map: *Table(*void, s64)) -> bool {
