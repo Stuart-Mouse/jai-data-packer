@@ -176,18 +176,18 @@ pack_data :: (data: Any) -> ([] u8, bool) {
 unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
     recurse :: (type: *Type_Info, buffer: *[] u8, offset: s64) -> bool {
         // print("Unpacking data of type % at offset %\n", type.*, offset);
-    
+        
         if type.type == {
           case .STRUCT;
             ti_struct := cast(*Type_Info_Struct) type;
             for ti_struct.members {
                 if !recurse(it.type, buffer, offset + it.offset_in_bytes) {
-                    print("Error while packing data for array.\n");
+                    print("Error while unpacking data for struct member.\n");
                     return false;
                 }
             }
             
-          case .ARRAY;
+          case .ARRAY;          
             data_offset : s64 = ---;
             elem_count  : int = ---;
             
@@ -353,6 +353,14 @@ remap_data :: (dst: Any, src: Any) -> bool {
             raw_array := cast(*Resizable_Array) dst.value_pointer;
             dst_data       = raw_array.data;
             dst_elem_count = raw_array.count;
+            if dst_data == null || dst_elem_count < 0 {
+                // TODO: set allocators for array views' data
+                raw_array.data  = alloc(src_elem_count * dst.type.runtime_size);
+                raw_array.count = src_elem_count;
+                
+                dst_data       = raw_array.data;
+                dst_elem_count = raw_array.count;
+            }
             
           case .RESIZABLE;
             raw_array := cast(*Resizable_Array) dst.value_pointer;
@@ -362,8 +370,10 @@ remap_data :: (dst: Any, src: Any) -> bool {
             dst_elem_count  = raw_array.count;
         }
         
-        if dst_data == null || dst_elem_count == 0 
-            return true;
+        if dst_data == null || dst_elem_count == 0 {
+            print("array was null or empty\n");
+            return false;
+        }
         
         min_count := min(dst_elem_count, src_elem_count);
         
@@ -377,7 +387,10 @@ remap_data :: (dst: Any, src: Any) -> bool {
         };
         
         for 0..min_count-1 {
-            if !remap_data(dst_elem_any, src_elem_any)  return false;
+            if !remap_data(dst_elem_any, src_elem_any) {
+                print("unable to remap data\n");
+                return false;
+            }
             src_elem_any.value_pointer += src_ti.element_type.runtime_size;
             dst_elem_any.value_pointer += dst_ti.element_type.runtime_size;
         }

@@ -9,7 +9,7 @@ main :: () {
             The structure here is very much contrived for demonstration purposes, but as you can see there are a variety of data types represented.
         */
         Test_Struct :: struct {
-            numbers    : [5] u8;
+            numbers    : [] u8;
             floating   : float;
             text       : string;
             enumerated : enum { A; B; C; D; };
