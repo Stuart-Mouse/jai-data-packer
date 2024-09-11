@@ -20,6 +20,7 @@
     
 */
 
+// TODO: This is a bad proc because it ignores the return values of pack data
 // packs the given data and its type info and writes each to a separate file
 pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data: Any) -> bool {
     if !write_entire_file(type_info_file_path, cast(string) pack_data(data.type))  return false;
@@ -53,18 +54,31 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
 }
 
 
+Data_Chunk :: struct {
+    source     : *void;
+    dst_offset : s64;
+    dst_size   : s64;
+}
+
+
+add_chunk :: (chunks: *[..] Data_Chunk, buffer: *[] u8, chunk_size: s64, source: *void) {
+    array_add(chunks, .{ source, buffer.count, chunk_size });
+    array_resize(buffer, buffer.count + chunk_size);
+}
+
+
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
-pack_data :: (data: Any) -> ([] u8, bool) {
-    recurse :: (data: Any, buffer: *[] u8, write_offset: s64, pointer_map: *Table(*void, s64)) -> bool {
+pack_data :: (data: Any) -> ([] u8, [..] Data_Chunk, bool) {
+    recurse :: (data: Any, buffer: *[] u8, chunks: *[..] Data_Chunk, write_offset: s64, pointer_map: *Table(*void, s64)) -> bool {
         // print("Writing % at offset %\n", (cast(*Type)*data.type).*, write_offset);
         // print("Writing % at offset %\n", data.type.*, write_offset);
-    
+        
         if data.type.type == {
           case .STRUCT;
             ti_struct := cast(*Type_Info_Struct) data.type;
             for ti_struct.members {
                 member_any := Any.{ it.type, data.value_pointer + it.offset_in_bytes };
-                if !recurse(member_any, buffer, write_offset + it.offset_in_bytes, pointer_map) {
+                if !recurse(member_any, buffer, chunks, write_offset + it.offset_in_bytes, pointer_map) {
                     // print("Error while packing data for array.\n");
                     return false;
                 }
@@ -80,26 +94,28 @@ pack_data :: (data: Any) -> ([] u8, bool) {
                 raw_array  := (cast(*Resizable_Array) data.value_pointer).*;
                 src_data    = raw_array.data;
                 elem_count  = raw_array.count;
-                data_offset = buffer.count;
+                data_offset = buffer.count; // elements will be written to end of buffer
                 
-                raw_array.data = xx buffer.count;
+                raw_array.data = xx buffer.count;                                         // adjust data pointer in raw array before writing
                 memcpy(*buffer.data[write_offset], *raw_array, data.type.runtime_size);   // this will work for both resizable and slice because we use the orig data any's runtime size
                 
-                array_resize(buffer, buffer.count + (ti_array.element_type.runtime_size * raw_array.count));
+                // array resize here makes space for the data of resizable array / array view
+                // array_resize(buffer, buffer.count + (ti_array.element_type.runtime_size * raw_array.count));
+                add_chunk(chunks, buffer, ti_array.element_type.runtime_size * raw_array.count, src_data);
             } else {
                 src_data    = data.value_pointer;
                 elem_count  = ti_array.array_count;
                 data_offset = write_offset;
             }
-
+            
             elem_any := Any.{ ti_array.element_type, src_data };
             for 0..elem_count-1 {
-                if !recurse(elem_any, buffer, data_offset, pointer_map) {
+                if !recurse(elem_any, buffer, chunks, data_offset, pointer_map) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
                 elem_any.value_pointer += ti_array.element_type.runtime_size;
-                data_offset += ti_array.element_type.runtime_size;
+                data_offset            += ti_array.element_type.runtime_size;
             }
             
           case .BOOL;    #through;
@@ -113,7 +129,8 @@ pack_data :: (data: Any) -> ([] u8, bool) {
             str_dst := buffer.count;
             
             // print("Writing string data at offset %\n", str_dst);
-            array_resize(buffer, buffer.count + str.count);
+            // array_resize(buffer, buffer.count + str.count);
+            add_chunk(chunks, buffer, str.count, str.data);
             memcpy(*buffer.data[str_dst], str.data, str.count);
             
             str.data = xx str_dst;
@@ -140,10 +157,11 @@ pack_data :: (data: Any) -> ([] u8, bool) {
                 ptr_offset = buffer.count;
                 table_add(pointer_map, raw_pointer, ptr_offset);
                 
-                array_resize(buffer, buffer.count + ti_derefed.runtime_size);
+                // array_resize(buffer, buffer.count + ti_derefed.runtime_size);
+                add_chunk(chunks, buffer, ti_derefed.runtime_size, raw_pointer);
                 
                 derefed_any := Any.{ ti_derefed, raw_pointer };
-                if !recurse(derefed_any, buffer, ptr_offset, pointer_map) {
+                if !recurse(derefed_any, buffer, chunks, ptr_offset, pointer_map) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
@@ -162,14 +180,17 @@ pack_data :: (data: Any) -> ([] u8, bool) {
     
     buffer: [] u8;
     pointer_map: Table(*void, s64);
+    chunks: [..] Data_Chunk;
     
-    array_resize(*buffer, data.type.runtime_size);
-    if !recurse(data, *buffer, 0, *pointer_map) {
+    // array_resize(*buffer, data.type.runtime_size);
+    add_chunk(*chunks, *buffer, data.type.runtime_size, data.value_pointer);
+    if !recurse(data, *buffer, *chunks, 0, *pointer_map) {
         free(buffer.data);
-        return .[], false;
+        array_free(chunks);
+        return .[], chunks, false;
     }
     
-    return buffer, true;
+    return buffer, chunks, true;
 }
 
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
@@ -281,6 +302,7 @@ remap_data :: (dst: Any, src: Any) -> bool {
         for dst_member: dst_ti.members {
             for src_member: src_ti.members {
                 if dst_member.name == src_member.name {
+                    // print("mapping data to struct member named \"%\"\n", dst_member.name);
                     remap_data(
                         Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes }, 
                         Any.{ src_member.type, src.value_pointer + src_member.offset_in_bytes }
@@ -355,7 +377,9 @@ remap_data :: (dst: Any, src: Any) -> bool {
             dst_elem_count = raw_array.count;
             if dst_data == null || dst_elem_count < 0 {
                 // TODO: set allocators for array views' data
-                raw_array.data  = alloc(src_elem_count * dst.type.runtime_size);
+                // print("allocating % bytes\n", src_elem_count * src_ti.element_type.runtime_size);
+                raw_array.data  = alloc(src_elem_count * dst_ti.element_type.runtime_size);
+                // print("raw_array.data = %\n", raw_array.data);
                 raw_array.count = src_elem_count;
                 
                 dst_data       = raw_array.data;
@@ -377,14 +401,8 @@ remap_data :: (dst: Any, src: Any) -> bool {
         
         min_count := min(dst_elem_count, src_elem_count);
         
-        src_elem_any := Any.{
-            value_pointer = src_data, 
-            type          = src_ti.element_type
-        };
-        dst_elem_any := Any.{
-            value_pointer = dst_data, 
-            type          = dst_ti.element_type
-        };
+        src_elem_any := Any.{ src_ti.element_type, src_data };
+        dst_elem_any := Any.{ dst_ti.element_type, dst_data };
         
         for 0..min_count-1 {
             if !remap_data(dst_elem_any, src_elem_any) {
