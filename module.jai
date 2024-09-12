@@ -20,11 +20,38 @@
     
 */
 
-// TODO: This is a bad proc because it ignores the return values of pack data
 // packs the given data and its type info and writes each to a separate file
 pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data: Any) -> bool {
-    if !write_entire_file(type_info_file_path, cast(string) pack_data(data.type))  return false;
-    if !write_entire_file(file_path,           cast(string) pack_data(data)     )  return false;
+    {
+        data, chunks, ok := pack_data(data.type);
+        defer array_free(chunks);
+        if !ok {
+            log("Failed to pack type info!\n");
+            return false;
+        }
+        
+        ok = write_entire_file(type_info_file_path, cast(string) data);
+        if !ok {
+            log("Failed to write type info to file!\n");
+            return false;
+        }
+    }
+    
+    {
+        data, chunks, ok := pack_data(data);
+        defer array_free(chunks);
+        if !ok {
+            log("Failed to pack data!\n");
+            return false;
+        }
+        
+        ok = write_entire_file(file_path, cast(string) data);
+        if !ok {
+            log("Failed to write data to file!\n");
+            return false;
+        }
+    }
+    
     return true;
 }
 
@@ -54,18 +81,57 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
 }
 
 
-Data_Chunk :: struct {
-    source     : *void;
-    dst_offset : s64;
-    dst_size   : s64;
+
+Packer :: struct {
+    total_size_bytes: int;
+    chunks   : [..] [] u8;
+    pointers : [..] **void;
+    types    : [..] *Type_Info;
 }
 
+
+append_chunks :: (packer: *Packer, data: Any) -> bool {
+    // recursively get chunks to append
+    // copy structure from pack_data, but instead only record data chunks and pointers locations
+}
+
+// we only need to worry about overlapping chunks of data when we jump through a pointer
+// so each time we go through a pointer, we check if that pointer has already been added to the list, or if it points to data which is within the range covered by another data chunk
+// it is techincally possible that we could have two pointers to overlapping regions of data, where neither one contains the entire region
+// in which case we would want to consolidate those two chunks together, by just expanding the first data chunk to include the length of the second
+// but do we really even want to consider that a realistic possibility?  The only reason I can even think why that would happen is having a string that is a substring of another string, or two views onto the same underlying array
+// and what kind of a person even serializes that kind of data?
+
+
+write_data :: (packer: Packer, file_path: string) { 
+    buffer := NewArray(packer.total_size_btyes, u8);
+    
+    
+    
+    for chunks  memcpy(*buffer[dst_offset], it.pointer, it.dst_size);
+    
+    
+}
+
+write_type_info :: (packer: Packer, file_path: string) { 
+    /*
+        will need to get chunks on the types in the same way as we do for data
+        we also want to do some extra work to reduce the amount of type info stored
+        prevent storing basic types
+            ints, floats, string, (enums probably, just use underlying integer type)
+    */
+}
+
+Data_Chunk :: struct {
+    pointer       : *void;
+    size_bytes    : u64;
+    output_offset : u64;
+}
 
 add_chunk :: (chunks: *[..] Data_Chunk, buffer: *[] u8, chunk_size: s64, source: *void) {
     array_add(chunks, .{ source, buffer.count, chunk_size });
     array_resize(buffer, buffer.count + chunk_size);
 }
-
 
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
 pack_data :: (data: Any) -> ([] u8, [..] Data_Chunk, bool) {
@@ -279,6 +345,8 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
 }
 
 remap_data :: (dst: Any, src: Any) -> bool {
+    // TODO: we should handle some specific cases where types of types don't match
+    // e.g. int/float/enum are all intrinsically numeric and we should handle converting between those types, somewhat
     if dst.type.type != src.type.type  return false;
     
     if dst.type.type == {
@@ -287,7 +355,7 @@ remap_data :: (dst: Any, src: Any) -> bool {
         return true;
 
       case .BOOL; #through;
-    
+        
       case .INTEGER;
         return dynamic_int_cast(dst, src);
         
@@ -317,7 +385,7 @@ remap_data :: (dst: Any, src: Any) -> bool {
       case .ENUM;
         src_ti := cast(*Type_Info_Enum) src.type;
         dst_ti := cast(*Type_Info_Enum) dst.type;
-        
+                
         if (src_ti.enum_type_flags & .SPECIFIED) 
         && (dst_ti.enum_type_flags & .SPECIFIED) {
             return dynamic_int_cast(dst, src);

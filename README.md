@@ -17,9 +17,9 @@ Again, this process is done recursively on the provided data structures.
 Putting these two things together, we can serialize or deserialize and data we want provided a Type_Info structure to guide the process, and the remapping will handle any trivial changes in the binary data format.
 
 If you're familiar with Protobuffs, this is kind of like that, but built specifically for Jai's type system.
-And thanks to most of the real work being done for us, the implementation is
+And thanks to most of the real work being done for us, the implementation is pretty simple.
 
-Obviosuly, serializing and deserializing one's binary data in this fashion is mush slower than using handwritten procedures, but the intention here is to have a quick and dirty catchall solution to use during development.
+Obviously, serializing and deserializing one's binary data in this fashion is mush slower than using handwritten procedures, but the intention here is to have a quick and dirty catchall solution to use during development.
 And I'm quite confident that it's still a much more efficient solution than using a textual format like JSON or (God forbid) XML.
 
 The basic data remapper currently only handles the most trivial cases of data changes (e.g. changing size/signedness of numeric types or size/type of an array), but I do plan to add some means of extending the remapper's capabilities in the near future.
