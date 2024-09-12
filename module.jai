@@ -23,8 +23,8 @@
 // packs the given data and its type info and writes each to a separate file
 pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data: Any) -> bool {
     {
-        data, chunks, ok := pack_data(data.type);
-        defer array_free(chunks);
+        data, ok := pack_data(data.type);
+        defer array_free(data);
         if !ok {
             log("Failed to pack type info!\n");
             return false;
@@ -38,8 +38,8 @@ pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data
     }
     
     {
-        data, chunks, ok := pack_data(data);
-        defer array_free(chunks);
+        data, ok := pack_data(data);
+        defer array_free(data);
         if !ok {
             log("Failed to pack data!\n");
             return false;
@@ -81,61 +81,9 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
 }
 
 
-
-Packer :: struct {
-    total_size_bytes: int;
-    chunks   : [..] [] u8;
-    pointers : [..] **void;
-    types    : [..] *Type_Info;
-}
-
-
-append_chunks :: (packer: *Packer, data: Any) -> bool {
-    // recursively get chunks to append
-    // copy structure from pack_data, but instead only record data chunks and pointers locations
-}
-
-// we only need to worry about overlapping chunks of data when we jump through a pointer
-// so each time we go through a pointer, we check if that pointer has already been added to the list, or if it points to data which is within the range covered by another data chunk
-// it is techincally possible that we could have two pointers to overlapping regions of data, where neither one contains the entire region
-// in which case we would want to consolidate those two chunks together, by just expanding the first data chunk to include the length of the second
-// but do we really even want to consider that a realistic possibility?  The only reason I can even think why that would happen is having a string that is a substring of another string, or two views onto the same underlying array
-// and what kind of a person even serializes that kind of data?
-
-
-write_data :: (packer: Packer, file_path: string) { 
-    buffer := NewArray(packer.total_size_btyes, u8);
-    
-    
-    
-    for chunks  memcpy(*buffer[dst_offset], it.pointer, it.dst_size);
-    
-    
-}
-
-write_type_info :: (packer: Packer, file_path: string) { 
-    /*
-        will need to get chunks on the types in the same way as we do for data
-        we also want to do some extra work to reduce the amount of type info stored
-        prevent storing basic types
-            ints, floats, string, (enums probably, just use underlying integer type)
-    */
-}
-
-Data_Chunk :: struct {
-    pointer       : *void;
-    size_bytes    : u64;
-    output_offset : u64;
-}
-
-add_chunk :: (chunks: *[..] Data_Chunk, buffer: *[] u8, chunk_size: s64, source: *void) {
-    array_add(chunks, .{ source, buffer.count, chunk_size });
-    array_resize(buffer, buffer.count + chunk_size);
-}
-
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
-pack_data :: (data: Any) -> ([] u8, [..] Data_Chunk, bool) {
-    recurse :: (data: Any, buffer: *[] u8, chunks: *[..] Data_Chunk, write_offset: s64, pointer_map: *Table(*void, s64)) -> bool {
+pack_data :: (data: Any) -> ([] u8, bool) {
+    recurse :: (data: Any, buffer: *[] u8, write_offset: s64, pointer_map: *Table(*void, s64)) -> bool {
         // print("Writing % at offset %\n", (cast(*Type)*data.type).*, write_offset);
         // print("Writing % at offset %\n", data.type.*, write_offset);
         
@@ -144,7 +92,7 @@ pack_data :: (data: Any) -> ([] u8, [..] Data_Chunk, bool) {
             ti_struct := cast(*Type_Info_Struct) data.type;
             for ti_struct.members {
                 member_any := Any.{ it.type, data.value_pointer + it.offset_in_bytes };
-                if !recurse(member_any, buffer, chunks, write_offset + it.offset_in_bytes, pointer_map) {
+                if !recurse(member_any, buffer, write_offset + it.offset_in_bytes, pointer_map) {
                     // print("Error while packing data for array.\n");
                     return false;
                 }
@@ -166,8 +114,7 @@ pack_data :: (data: Any) -> ([] u8, [..] Data_Chunk, bool) {
                 memcpy(*buffer.data[write_offset], *raw_array, data.type.runtime_size);   // this will work for both resizable and slice because we use the orig data any's runtime size
                 
                 // array resize here makes space for the data of resizable array / array view
-                // array_resize(buffer, buffer.count + (ti_array.element_type.runtime_size * raw_array.count));
-                add_chunk(chunks, buffer, ti_array.element_type.runtime_size * raw_array.count, src_data);
+                array_resize(buffer, buffer.count + (ti_array.element_type.runtime_size * raw_array.count));
             } else {
                 src_data    = data.value_pointer;
                 elem_count  = ti_array.array_count;
@@ -176,7 +123,7 @@ pack_data :: (data: Any) -> ([] u8, [..] Data_Chunk, bool) {
             
             elem_any := Any.{ ti_array.element_type, src_data };
             for 0..elem_count-1 {
-                if !recurse(elem_any, buffer, chunks, data_offset, pointer_map) {
+                if !recurse(elem_any, buffer, data_offset, pointer_map) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
@@ -195,8 +142,7 @@ pack_data :: (data: Any) -> ([] u8, [..] Data_Chunk, bool) {
             str_dst := buffer.count;
             
             // print("Writing string data at offset %\n", str_dst);
-            // array_resize(buffer, buffer.count + str.count);
-            add_chunk(chunks, buffer, str.count, str.data);
+            array_resize(buffer, buffer.count + str.count);
             memcpy(*buffer.data[str_dst], str.data, str.count);
             
             str.data = xx str_dst;
@@ -223,11 +169,10 @@ pack_data :: (data: Any) -> ([] u8, [..] Data_Chunk, bool) {
                 ptr_offset = buffer.count;
                 table_add(pointer_map, raw_pointer, ptr_offset);
                 
-                // array_resize(buffer, buffer.count + ti_derefed.runtime_size);
-                add_chunk(chunks, buffer, ti_derefed.runtime_size, raw_pointer);
+                array_resize(buffer, buffer.count + ti_derefed.runtime_size);
                 
                 derefed_any := Any.{ ti_derefed, raw_pointer };
-                if !recurse(derefed_any, buffer, chunks, ptr_offset, pointer_map) {
+                if !recurse(derefed_any, buffer, ptr_offset, pointer_map) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
@@ -246,17 +191,14 @@ pack_data :: (data: Any) -> ([] u8, [..] Data_Chunk, bool) {
     
     buffer: [] u8;
     pointer_map: Table(*void, s64);
-    chunks: [..] Data_Chunk;
     
-    // array_resize(*buffer, data.type.runtime_size);
-    add_chunk(*chunks, *buffer, data.type.runtime_size, data.value_pointer);
-    if !recurse(data, *buffer, *chunks, 0, *pointer_map) {
+    array_resize(*buffer, data.type.runtime_size);
+    if !recurse(data, *buffer, 0, *pointer_map) {
         free(buffer.data);
-        array_free(chunks);
-        return .[], chunks, false;
+        return .[], false;
     }
     
-    return buffer, chunks, true;
+    return buffer, true;
 }
 
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
