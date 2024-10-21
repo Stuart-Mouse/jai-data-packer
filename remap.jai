@@ -385,8 +385,8 @@ remap_array :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> 
 
 // check if we are allowed do it by name, else do it by value
 remap_enum :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> bool { 
-    assert(src.type.type == .ENUM, "expected ENUM, got %", src.type.type);
-    assert(dst.type.type == .ENUM, "expected ENUM, got %", dst.type.type);
+    assert(src.type.type == .ENUM);
+    assert(dst.type.type == .ENUM);
     
     src_ti := cast(*Type_Info_Enum) src.type;
     dst_ti := cast(*Type_Info_Enum) dst.type;
@@ -519,7 +519,7 @@ remap_float :: inline (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTIN
             log_disallowed_conversion(conversion, "remap_float");
             return false;
         }
-        int_to_int(dst, src);
+        int_to_float(dst, src);
         return true;
         
       case .FLOAT; 
