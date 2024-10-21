@@ -78,7 +78,13 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
     );
     if !ok  return false;
     
-    return remap_data(data, data_any);
+    error := remap_data(data, data_any);
+    if error.error_type {
+        log("Error while remapping data: %", error);
+        return false;
+    }
+    
+    return true;
 }
 
 
