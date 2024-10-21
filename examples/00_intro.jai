@@ -3,6 +3,17 @@
 #import "Data_Packer";
 
 main :: () {
+    Fruit :: enum {
+        NONE;
+        APPLE;
+        PEAR;
+        BANANA;
+        KIWIFRUIT;
+        WATERMELON;
+        APRICOT;
+    }
+    
+
     {
         /*
             Imagine we have some program with the following data structure and we want to serialize it to a file.
@@ -15,6 +26,7 @@ main :: () {
             enumerated : enum { A; B; C; D; };
             boolean    : bool;
             pointer    : *Test_Struct;
+            fruit      : Fruit;
         }
         
         // Creating an instance of the struct to serialize...
@@ -24,6 +36,7 @@ main :: () {
             text       = "lorem ipsum",
             boolean    = true,
             enumerated = .C,
+            fruit      = .APPLE
         };
         
         // And another one in order to show serialization through a pointer...
@@ -32,6 +45,7 @@ main :: () {
             floating   = 5.25,
             text       = "muspi merol",
             enumerated = .B,
+            fruit      = .PEAR
         };
         
         test.pointer = *test_other;
@@ -65,6 +79,7 @@ main :: () {
             floating   : float64;
             pointer    : *Test_Struct;
             boolean    : bool;
+            fruit      : [4] Fruit;
         }
         
         // When we wrote the earlier version of our structure out to file, we also saved a type info file.
