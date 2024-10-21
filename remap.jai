@@ -61,7 +61,7 @@ Conversion_Types :: enum_flags u64 {
 Conversion_Settings :: struct {
     allowed_conversions   : Conversion_Types;
     float_to_int_rounding : enum { TRUNCATE; FLOOR; CEIL; NEAREST; };
-    // TODO: probably add some more in-depth rules for struct rempapping.
+    // TODO: probably add some more in-depth rules for struct remapping.
     //       and probably allow overloading these on a per-struct basis
     //       maybe we check for certain notes on the struct/members?
     //       we could use notes for some aspects of arrays (views owning data, allocator for resizable arrays) idk
@@ -72,32 +72,13 @@ is_allowed :: inline (settings: Conversion_Settings, conversion_type: Conversion
     return settings.allowed_conversions & conversion_type == conversion_type;
 }
 
-// helper macro for returning error in case of disallowed conversion
-return_if_disallowed :: (settings: Conversion_Settings, conversion_type: Conversion_Types, dst_ti: *Type_Info, src_ti: *Type_Info) #expand {
-    if !is_allowed(settings, conversion_type) {
-        `return Conversion_Error.{ 
-            erorr_type      = .DISALLOWED_CONVERSION,
-            conversion_type = conversion_type,
-            dst_type_info   = dst_ti,
-            src_type_info   = src_ti,
-        };
-    }
+log_disallowed_conversion :: inline (conversion: Conversion_Types, proc_name: string) {
+    log("Error: disallowed conversion % in %", conversion, proc_name);
 }
 
-Conversion_Error_Type :: enum {
-    NONE;
-    UNSUPPORTED_CONVERSION;
-    DISALLOWED_CONVERSION;
-    INVALID_TYPE;
-};
-
-// safe to check with 'if !error ...' as the zero-value means no error
-Conversion_Error :: struct {
-    error_type      : Conversion_Error_Type;
-    conversion_type : Conversion_Types;
-    src_type_info   : *Type_Info;
-    dst_type_info   : *Type_Info;
-};
+log_unsupported_conversion :: inline (conversion: Conversion_Types, proc_name: string) {
+    log("Error: unsupported conversion % in %", conversion, proc_name);
+}
 
 DEFAULT_CONVERSION_SETTINGS :: Conversion_Settings.{
     allowed_conversions   = .ALL,
@@ -187,7 +168,7 @@ remap_struct :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) ->
     assert(dst.type.type == .STRUCT);
     
     if !is_allowed(settings, .REMAP_STRUCT) {
-        // return Conversion_Error.{ .UNSUPPORTED_CONVERSION, UNKNOWN_CONVERSION };
+        log_unsupported_conversion(.UNKNOWN_CONVERSION, "remap_struct");
         return false;
     }
     
@@ -321,11 +302,9 @@ remap_array :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> 
     }
     
     if !is_allowed(settings, conversion_type) {
-        error := Conversion_Error.{ 
-            error_type = ifx conversion_type then .DISALLOWED_CONVERSION else .UNSUPPORTED_CONVERSION,
-            conversion_type = conversion_type
-        };
-        log("Conversion error in remap_array: %\n", error);
+        if conversion_type 
+            then log_disallowed_conversion(conversion_type, "remap_array");
+            else log_unsupported_conversion(conversion_type, "remap_array");
         return false;
     }
     
@@ -376,7 +355,7 @@ remap_array :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> 
     }
     
     if dst_data == null || dst_elem_count == 0 {
-        log("array was null or empty");
+        log("Error: array was null or empty");
         return false;
     }
     
@@ -394,7 +373,7 @@ remap_array :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> 
     
     for 0..min_count-1 {
         if !remap_data(dst_elem_any, src_elem_any, settings) {
-            log("unable to remap data");
+            log("Error: unable to remap data");
             return false;
         }
         src_elem_any.value_pointer += src_elem_type.runtime_size;
@@ -421,14 +400,13 @@ remap_enum :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> b
         // if we are mapping by name, then it really doesn't make sense to map an enum to enum_flags, does it?
         // for now, we will prohibit it
         if (dst_ti.enum_type_flags & .FLAGS) != (src_ti.enum_type_flags & .FLAGS) {
-            error := Conversion_Error.{ .UNSUPPORTED_CONVERSION, .ENUM_TO_FLAGS, src.type, dst.type };
-            log("Conversion error in remap_enum: %\n", error);
+            log_disallowed_conversion(conversion, "remap_enum");
             return false;
         }
         
         if dst_ti.enum_type_flags & .FLAGS {
             src_s64, dst_s64: s64;
-            if !enum_to_int(src_s64, src)  return false;
+            enum_to_int(src_s64, src);
             
             for src_ti.values {
                 if it & src_s64 == src_s64 {
@@ -441,11 +419,12 @@ remap_enum :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> b
                 }
             }
             
-            if !int_to_enum(dst, dst_s64)  return false;
+            int_to_enum(dst, dst_s64);
+            return true;
         }
         else {
             src_s64: s64;
-            if !enum_to_int(src_s64, src)  return false;
+            enum_to_int(src_s64, src);
             
             src_value_name: string;
             for src_ti.values {
@@ -454,28 +433,31 @@ remap_enum :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> b
                     break;
                 }
             }
-            if !src_value_name  return false;
             
-            for dst_ti.names {
-                if it == src_value_name {
-                    int_to_enum(dst, dst_ti.values[it_index]);
-                    return true;
+            if src_value_name {
+                for dst_ti.names {
+                    if it == src_value_name {
+                        int_to_enum(dst, dst_ti.values[it_index]);
+                        return true;
+                    }
                 }
             }
             
-            return false;
+            // For now, if we are not able to match by name, we will still fallback to trying to match by value.
+            // log("Error: unable to match enum value by name in %", conversion, proc_name);
+            // return false;
         }
     }
     
     conversion = .ENUM_BY_VALUE;
     if is_narrowing_int(dst_ti.internal_type, src_ti.internal_type)  conversion |= .INT_NARROWING;
     if !is_allowed(settings, conversion) {
-        error := Conversion_Error.{ .DISALLOWED_CONVERSION, conversion, src.type, dst.type };
-        log("Conversion error in remap_enum: %\n", error);
+        log_disallowed_conversion(conversion, "remap_enum");
         return false;
     }
     
-    return enum_to_enum(dst, src);
+    enum_to_enum(dst, src);
+    return true;
 }
 
 remap_int :: inline (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> bool {
@@ -486,30 +468,30 @@ remap_int :: inline (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS
         conversion := Conversion_Types.ENUM_TO_INT;
         if is_narrowing_int(xx dst.type, (cast(*Type_Info_Enum)src.type).internal_type)  conversion |= .INT_NARROWING;
         if !is_allowed(settings, conversion) {
-            error := Conversion_Error.{ .DISALLOWED_CONVERSION, conversion, src.type, dst.type };
-            log("Conversion error in remap_int: %\n", error);
+            log_disallowed_conversion(conversion, "remap_int");
             return false;
         }
-        return enum_to_int(dst, src);
+        enum_to_int(dst, src);
+        return true;
         
       case .INTEGER;
         conversion := Conversion_Types.INT_TO_INT;
         if is_narrowing_int(xx dst.type, xx src.type)  conversion |= .INT_NARROWING;
         if !is_allowed(settings, conversion) {
-            error := Conversion_Error.{ .DISALLOWED_CONVERSION, conversion, src.type, dst.type };
-            log("Conversion error in remap_int: %\n", error);
+            log_disallowed_conversion(conversion, "remap_int");
             return false;
         }
-        return int_to_int(dst, src);
+        int_to_int(dst, src);
+        return true;
         
       case .FLOAT; 
         conversion := Conversion_Types.FLOAT_TO_INT;
         if !is_allowed(settings, conversion) {
-            error := Conversion_Error.{ .DISALLOWED_CONVERSION, conversion, src.type, dst.type };
-            log("Conversion error in remap_int: %\n", error);
+            log_disallowed_conversion(conversion, "remap_int");
             return false;
         }
-        return float_to_int(dst, src);
+        float_to_int(dst, src);
+        return true;
         
       case .BOOL;
         return bool_to_any(dst, src);
@@ -525,30 +507,30 @@ remap_float :: inline (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTIN
       case .ENUM; 
         conversion := Conversion_Types.ENUM_TO_FLOAT;
         if !is_allowed(settings, conversion) {
-            error := Conversion_Error.{ .DISALLOWED_CONVERSION, conversion, src.type, dst.type };
-            log("Conversion error in remap_float: %\n", error);
+            log_disallowed_conversion(conversion, "remap_float");
             return false;
         }
-        return enum_to_float(dst, src);
+        enum_to_float(dst, src);
+        return true;
         
       case .INTEGER;
         conversion := Conversion_Types.INT_TO_FLOAT;
         if !is_allowed(settings, conversion) {
-            error := Conversion_Error.{ .DISALLOWED_CONVERSION, conversion, src.type, dst.type };
-            log("Conversion error in remap_float: %\n", error);
+            log_disallowed_conversion(conversion, "remap_float");
             return false;
         }
-        return int_to_int(dst, src);
+        int_to_int(dst, src);
+        return true;
         
       case .FLOAT; 
         conversion := Conversion_Types.FLOAT_TO_FLOAT;
         if is_narrowing_float(xx dst.type, xx src.type)  conversion |= .FLOAT_NARROWING;
         if !is_allowed(settings, conversion) {
-            error := Conversion_Error.{ .DISALLOWED_CONVERSION, conversion, src.type, dst.type };
-            log("Conversion error in remap_float: %\n", error);
+            log_disallowed_conversion(conversion, "remap_float");
             return false;
         }
-        return float_to_float(dst, src);
+        float_to_float(dst, src);
+        return true;
         
       case .BOOL;
         return bool_to_any(dst, src);
@@ -613,11 +595,6 @@ remap_float :: inline (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTIN
         so they can plug in their own thing if its relevant to their particular domain
         (I could see it maybe being useful for certain network applications?)
     
-    
-    On settings checks
-
-    we prbably want to factor the checks for things like "allow_narrowing" into the remap scope 
-    so that we don't have to return a Conversion_Error from the small utility functions 
     
     
     
@@ -685,7 +662,7 @@ is_narrowing_int :: (dst_ti: *Type_Info_Integer, src_ti: *Type_Info_Integer) -> 
     return false;
 }
 
-int_to_int :: (dst: Any, src: Any) -> bool {
+int_to_int :: (dst: Any, src: Any) {
     assert(src.type.type == .INTEGER);
     assert(dst.type.type == .INTEGER);
     
@@ -701,7 +678,7 @@ int_to_int :: (dst: Any, src: Any) -> bool {
     // if both are u64, then using s64 as an intermediate (as we do below) is problematic
     if src_ti == type_info(u64) && dst_ti == type_info(u64) {
         (cast(*u64)dst.value_pointer).* = (cast(*u64)src.value_pointer).*;
-        return true;
+        return;
     }
     
     // all other cases we can use s64 as an intermediate and then we don't have to do the combinatorics
@@ -735,10 +712,9 @@ int_to_int :: (dst: Any, src: Any) -> bool {
         if src_ti.signed then (cast(*s64)dst.value_pointer).* = cast(s64) s64_value;
                          else (cast(*u64)dst.value_pointer).* = cast(u64) s64_value;
     }
-    return true;
 }
 
-float_to_int :: (dst: Any, src: Any) -> bool {
+float_to_int :: (dst: Any, src: Any) {
     assert(src.type.type == .FLOAT);
     assert(dst.type.type == .INTEGER);
     
@@ -753,8 +729,6 @@ float_to_int :: (dst: Any, src: Any) -> bool {
         case 4; (cast(*s32)src.value_pointer).* = cast(s32) s64_value;
         case 8; (cast(*s64)src.value_pointer).* = cast(s64) s64_value;
     }
-    
-    return true;
 }
 
 enum_as_int :: inline (src: Any) -> Any {
@@ -763,11 +737,11 @@ enum_as_int :: inline (src: Any) -> Any {
 }
 
 // for convenience
-int_to_enum   :: inline (dst: Any, src: Any) -> bool { return int_to_int(enum_as_int(dst), src); }
-enum_to_int   :: inline (dst: Any, src: Any) -> bool { return int_to_int(dst, enum_as_int(src)); }
-enum_to_enum  :: inline (dst: Any, src: Any) -> bool { return int_to_int(enum_as_int(dst), enum_as_int(src)); }
-float_to_enum :: inline (dst: Any, src: Any) -> bool { return float_to_int(enum_as_int(dst), src); }
-enum_to_float :: inline (dst: Any, src: Any) -> bool { return int_to_float(dst, enum_as_int(src)); }
+int_to_enum   :: inline (dst: Any, src: Any) { int_to_int(enum_as_int(dst), src); }
+enum_to_int   :: inline (dst: Any, src: Any) { int_to_int(dst, enum_as_int(src)); }
+enum_to_enum  :: inline (dst: Any, src: Any) { int_to_int(enum_as_int(dst), enum_as_int(src)); }
+float_to_enum :: inline (dst: Any, src: Any) { float_to_int(enum_as_int(dst), src); }
+enum_to_float :: inline (dst: Any, src: Any) { int_to_float(dst, enum_as_int(src)); }
 
 
 
@@ -775,7 +749,7 @@ is_narrowing_float :: inline (dst_ti: *Type_Info_Float, src_ti: *Type_Info_Float
     return src_ti.runtime_size > dst_ti.runtime_size;
 } 
 
-float_to_float :: (dst: Any, src: Any) -> bool {
+float_to_float :: (dst: Any, src: Any) {
     assert(src.type.type == .FLOAT);
     assert(dst.type.type == .FLOAT);
     
@@ -792,11 +766,9 @@ float_to_float :: (dst: Any, src: Any) -> bool {
           case 8; (cast(*float64)dst.value_pointer).* =               (cast(*float64)src.value_pointer).*;
         }
     }
-    
-    return true;
 }
 
-int_to_float :: (dst: Any, src: Any) -> bool {
+int_to_float :: (dst: Any, src: Any) {
     assert(src.type.type == .INTEGER);
     assert(dst.type.type == .FLOAT);
     
@@ -812,8 +784,6 @@ int_to_float :: (dst: Any, src: Any) -> bool {
         case 4; (cast(*float32)dst.value_pointer).* = cast(float32) f64_value;
         case 8; (cast(*float64)dst.value_pointer).* = cast(float64) f64_value;
     }
-    
-    return true;
 }
 
 
