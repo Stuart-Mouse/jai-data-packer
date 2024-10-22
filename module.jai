@@ -62,6 +62,7 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
     if !ok  return false;
     defer free(ti_file);
     
+    print("unpacking %\n", type_info_file_path);
     ti_any:, ok = unpack_data(
         type_info(*Type_Info), 
         cast(*[]u8) *ti_file
@@ -72,6 +73,7 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
     if !ok  return false;
     defer free(data_file);
     
+    print("unpacking %\n", file_path);
     data_any:, ok = unpack_data(
         (cast(**Type_Info) ti_any.value_pointer).*,
         cast(*[]u8) *data_file
@@ -80,6 +82,16 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
     
     return remap_data(data, data_any);
 }
+
+
+// TODO: consider reimplementing the Data_Chunk thing, this will probably give us more flexibility in the future
+
+// TODO: Perhaps all array types should just be encoded as array views. 
+//       This breaks the ability to simply memcpy many data types, but we already weren't able to do that...
+//       Plus, we're already gonna do some weird stuff for procedure pointers methinks
+//       First, need to just better cosider when we can shortcut with a memcpy
+//           we can memcpy structs when there are no pointers involved and types are equivalent
+//           we can memcpy fixed arrays if inner type is memcpy-able
 
 
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
@@ -202,19 +214,25 @@ pack_data :: (data: Any) -> ([] u8, bool) {
     return buffer, true;
 }
 
+debug_idents : [..] string;
+
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
+// we can't figure out where all pointers are within blob without just doing the whole recursive thing
+// but we may have multiple pointers that point to the same data
 unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
-    recurse :: (type: *Type_Info, buffer: *[] u8, offset: s64) -> bool {
+    recurse :: (type: *Type_Info, buffer: *[] u8, offset: s64, unpacked_offsets: *[..] s64) -> bool {
         // print("Unpacking data of type % at offset %\n", type.*, offset);
         
         if type.type == {
           case .STRUCT;
             ti_struct := cast(*Type_Info_Struct) type;
             for ti_struct.members {
-                if !recurse(it.type, buffer, offset + it.offset_in_bytes) {
+                array_add(*debug_idents, it.name);
+                if !recurse(it.type, buffer, offset + it.offset_in_bytes, unpacked_offsets) {
                     print("Error while unpacking data for struct member.\n");
                     return false;
                 }
+                pop(*debug_idents);
             }
             
           case .ARRAY;          
@@ -237,13 +255,15 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
             }
             
             for 0..elem_count-1 {
-                if !recurse(ti_array.element_type, buffer, data_offset) {
-                    print("Error while packing data for array.\n");
+                array_add(*debug_idents, tprint("[%]", it));
+                if !recurse(ti_array.element_type, buffer, data_offset, unpacked_offsets) {
+                    print("Error while unpacking data for array.\n");
                     return false;
                 }
                 data_offset += ti_array.element_type.runtime_size;
+                pop(*debug_idents);
             }
-    
+            
           case .STRING;
             str := (cast(*string) *buffer.data[offset]);
             if cast(u64) str.data >= cast(u64) buffer.data {
@@ -255,23 +275,35 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
           case .POINTER;
             ptr_ptr := (cast(**void) *buffer.data[offset]);
             if ptr_ptr.* != null {
-                derefed_offset := cast(s64) ptr_ptr.*;
-                if cast(u64) derefed_offset >= cast(u64) buffer.data {
-                    // print("pointer was already adjusted...\n");
+                // TODO: I dont think any of the pointer correcting logic will work until we change this logic
+                // We need to actually check ptr_ptr against a list of already adjusted pointers instead of this hacky method
+                derefed_offset := cast(u64) ptr_ptr.*;
+                print("adjusting ptr @ (%) % %\n", ptr_ptr, derefed_offset, debug_idents);
+                
+                if derefed_offset >= cast(u64) buffer.data {
+                    // print("data @ ptr was already unpacked\n");
+                    assert(false, "pointer @ % was already adjusted!\n", ptr_ptr);
                     return true;
                 }
                 
                 ptr_ptr.* = xx (buffer.data + derefed_offset);
                 // print("offset % -> ptr %\n", derefed_offset, ptr_ptr.*);
                 
+                if array_find(unpacked_offsets.*, cast(s64) derefed_offset) {
+                    print("data @ ptr was already unpacked\n");
+                    return true;
+                }
+                
+                array_add(unpacked_offsets, cast(s64) derefed_offset);
+                
                 _data := recast_type_info(Any.{ type, ptr_ptr });
                 if type != _data.type {
-                    // print("recast *Type_Info to %\n", (cast(*Type)*_data.type).*);
+                    print("recast *Type_Info to %\n", (cast(*Type)*_data.type).*);
                 }
                 
                 ti_derefed := (cast(*Type_Info_Pointer)_data.type).pointer_to;
-                if !recurse(ti_derefed, buffer, derefed_offset) {
-                    print("Error while packing data for array.\n");
+                if !recurse(ti_derefed, buffer, cast(s64) derefed_offset, unpacked_offsets) {
+                    print("Error while unpacking data through pointer.\n");
                     return false;
                 }
             }
@@ -280,12 +312,118 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
         return true;
     }
     
-    if !recurse(type, buffer, 0) {
+    unpacked_offsets: [..] s64;
+    defer array_free(unpacked_offsets);
+    
+    array_reset_keeping_memory(*debug_idents);
+    
+    if !recurse(type, buffer, 0, *unpacked_offsets) {
         return Any.{}, false;
     }
     
     return Any.{ type, *buffer.data[0] }, true;
 }
+
+
+
+
+/*
+    Packed Pointers
+    
+    When we pack a pointer, we just replace it with a u64 which encodes the offset of the pointed-to data within the data blob.
+
+    The top 32 bits of packed pointer are reserved for special flags that denote special handling for resolving the pointer.
+    
+    For example, we can use the highest bit to denote that a pointer should resolve to some local data which is not in the packed data.
+    We use this for common type_info's that we would not ever want to serialize, reducing bloat.
+    For these common type_info's, we just use the bottom 32 bits as an ID for looking up the actual type_info pointer we need.
+    
+    The special pointer resolution is implemented through callbacks so that users can do whatever they wish when resolving a pointer.
+    
+    At the moment, the LOCAL_DATA flag is the only one defined, but I may add some additional flags in the future.
+    So, I have reserved the top 2 bytes for myself, but feel free to define your own flags in the next 2 highest bytes
+    
+*/
+
+// similar to a Recast_Pointer_Proc
+// we give the callback the packed pointer and what it's a pointer to, and then the callback can figure out if it is able to resolve the pointer
+// this seems better than just using a blind lookup table, since we can consider the context of the type we are pointing to.
+// should be much easier for users to implement extended behaviour this way
+Resolve_Local_Pointer_Proc :: #type (packed_ptr: u64, pointer_to: *Type_Info) -> (*void, bool);
+
+Packed_Pointer_Masks :: enum u64 #specified {
+    DATA_OFFSET :: 0x0000_0000_FFFF_FFFF; // bottom 32 bits used for data offset in blob
+    
+    RESERVED    :: 0xFFFF_0000_0000_0000; // top 2 bytes reserved for future implementation
+    LOCAL_DATA  :: 1 << 63;               // signifies that the pointer should be resolved in reference to some local data
+    
+    USER        :: 0x0000_FFFF_0000_0000; // bytes 5 & 6 reserved for user-defined flags
+}
+
+// enumerates common type infos, used as ids for local pointers
+Common_Type_Infos :: enum u32 #specified {
+    VOID   ::  0;
+    U8     ::  1;
+    S8     ::  2;
+    U16    ::  3;
+    S16    ::  4;
+    U32    ::  5;
+    S32    ::  6;
+    U64    ::  7;
+    S64    ::  8;
+    F32    ::  9;
+    F64    :: 10;
+    BOOL   :: 11;
+    STRING :: 12;
+}
+
+resolve_common_type_info_pointer : Resolve_Local_Pointer_Proc : 
+    (packed_ptr: u64, pointer_to: *Type_Info) -> (*void, bool)
+{
+    if !is_type_info_subtype(pointer_to)  return null, false;
+    
+    ti_id := cast(Common_Type_Infos) (packed_pointer & cast(u64) Packed_Pointer_Masks.DATA_OFFSET);
+    
+    // if ti_id is not one of our enumerated values, then we can't resolve it
+    if !array_find(type_info(Common_Type_Infos).values, ti_id)  return null, false;
+    
+    if #complete ti_id == {
+        case .VOID   ; return void;
+        case .U8     ; return u8;
+        case .S8     ; return s8;
+        case .U16    ; return u16;
+        case .S16    ; return s16;
+        case .U32    ; return u32;
+        case .S32    ; return s32;
+        case .U64    ; return u64;
+        case .S64    ; return s64;
+        case .F32    ; return float32;
+        case .F64    ; return float64;
+        case .BOOL   ; return bool;
+        case .STRING ; return string;
+    }
+    
+    return null, false;
+}
+
+is_type_info_subtype :: (ti: *Type_Info) -> bool {
+    if ti == {
+      case type_info(Type_Info); return true;
+      case type_info(Type_Info_Integer); return true;
+      case type_info(Type_Info_Float); return true;
+      case type_info(Type_Info_Enum); return true;
+      case type_info(Type_Info_Bool); return true;
+      case type_info(Type_Info_String); return true;
+      case type_info(Type_Info_Struct); return true;
+      case type_info(Type_Info_Struct_Member); return true;
+      case type_info(Type_Info_Array); return true;
+      case type_info(Type_Info_Procedure); return true;
+      case type_info(Type_Info_Pointer); return true;
+    }
+    return false;
+}
+
+
 
 #scope_module
 

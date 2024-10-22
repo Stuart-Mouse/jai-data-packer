@@ -61,12 +61,25 @@ Conversion_Types :: enum_flags u64 {
 Conversion_Settings :: struct {
     allowed_conversions   : Conversion_Types;
     float_to_int_rounding : enum { TRUNCATE; FLOOR; CEIL; NEAREST; };
+    pointer_recast_procs  : [..] Pointer_Recast_Proc; // user can add new recasting procs here
+    
     // TODO: probably add some more in-depth rules for struct remapping.
     //       and probably allow overloading these on a per-struct basis
     //       maybe we check for certain notes on the struct/members?
     //       we could use notes for some aspects of arrays (views owning data, allocator for resizable arrays) idk
     //       better than notes would actually be just using the member data LUT thing I do in GON parser. (though this is still cope for not having structured notes)
 }
+
+// the Any's passed in and out must be pointers
+// returns true if the Any has been recast, false if not
+// this is only for casting down to a more specific type (e.g.: casting a *Type_Info down to a *Type_Info_Enum)
+Pointer_Recast_Proc :: #type (any: Any) -> (Any, bool);
+
+// TODO: consider also casting up to more general type? This is more of something we can do in a LUT I think.
+
+// TODO: also consider what to do about procedure pointers
+//       maybe we can give user a way to store procedures as a string or enum value in data packer, then deconvert on parse?
+
 
 is_allowed :: inline (settings: Conversion_Settings, conversion_type: Conversion_Types) -> bool { 
     return settings.allowed_conversions & conversion_type == conversion_type;
@@ -176,8 +189,19 @@ remap_struct :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) ->
     src_ti := cast(*Type_Info_Struct) src.type;
     
     // remap elements by name
+    last_dst_member_offset := -1;
+    last_src_member_offset := -1;
+    
     for dst_member: dst_ti.members {
+        if dst_member.flags & .CONSTANT  continue;
+        if dst_member.offset_in_bytes <= last_dst_member_offset  continue; // ignoring #place variables. Wish there were a better way to do this.
+        last_dst_member_offset = dst_member.offset_in_bytes;
+        
         for src_member: src_ti.members {
+            if src_member.flags & .CONSTANT  continue;
+            if src_member.offset_in_bytes <= last_src_member_offset  continue; // ignoring #place variables. Wish there were a better way to do this.
+            last_src_member_offset = src_member.offset_in_bytes;
+            
             if dst_member.name == src_member.name {
                 remap_data(
                     Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes }, 
@@ -405,22 +429,22 @@ remap_enum :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> b
         }
         
         if dst_ti.enum_type_flags & .FLAGS {
-            src_s64, dst_s64: s64;
-            enum_to_int(src_s64, src);
+            // src_s64, dst_s64: s64;
+            // enum_to_int(src_s64, src);
             
-            for src_ti.values {
-                if it & src_s64 == src_s64 {
-                    src_name := src_ti.names[it_index];
-                    for dst_ti.names {
-                        if it == src_name {
-                            dst_s64 |= dst_ti.values[it_index];
-                        }
-                    }
-                }
-            }
+            // for src_ti.values {
+            //     if it & src_s64 == src_s64 {
+            //         src_name := src_ti.names[it_index];
+            //         for dst_ti.names {
+            //             if it == src_name {
+            //                 dst_s64 |= dst_ti.values[it_index];
+            //             }
+            //         }
+            //     }
+            // }
             
-            int_to_enum(dst, dst_s64);
-            return true;
+            // int_to_enum(dst, dst_s64);
+            // return true;
         }
         else {
             src_s64: s64;
@@ -602,6 +626,8 @@ remap_float :: inline (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTIN
 
 // ========== Utility Conversions ==========
 
+// TODO: probably should create versions of the x_to_bool and bool_to_x functions that match other interfaces and don't require return
+// TODO: I think we should differentiate the any_to_x and remap_x procs
 
 bool_to_any :: (dst: Any, src: Any) -> bool {
     assert(src.type.type == .BOOL);
@@ -700,16 +726,16 @@ int_to_int :: (dst: Any, src: Any) {
     }
     if dst.type.runtime_size == {
       case 1; 
-        if src_ti.signed then (cast(*s8 )dst.value_pointer).* = cast(s8 ) s64_value;
+        if dst_ti.signed then (cast(*s8 )dst.value_pointer).* = cast(s8 ) s64_value;
                          else (cast(*u8 )dst.value_pointer).* = cast(u8 ) s64_value;
       case 2; 
-        if src_ti.signed then (cast(*s16)dst.value_pointer).* = cast(s16) s64_value;
+        if dst_ti.signed then (cast(*s16)dst.value_pointer).* = cast(s16) s64_value;
                          else (cast(*u16)dst.value_pointer).* = cast(u16) s64_value;
       case 4; 
-        if src_ti.signed then (cast(*s32)dst.value_pointer).* = cast(s32) s64_value;
+        if dst_ti.signed then (cast(*s32)dst.value_pointer).* = cast(s32) s64_value;
                          else (cast(*u32)dst.value_pointer).* = cast(u32) s64_value;
       case 8; 
-        if src_ti.signed then (cast(*s64)dst.value_pointer).* = cast(s64) s64_value;
+        if dst_ti.signed then (cast(*s64)dst.value_pointer).* = cast(s64) s64_value;
                          else (cast(*u64)dst.value_pointer).* = cast(u64) s64_value;
     }
 }
@@ -836,6 +862,7 @@ are_structs_equivalent :: (ti1: *Type_Info_Struct, ti2: *Type_Info_Struct) -> bo
     if ti1.members.count != ti2.members.count  return false;
     
     // TODO: validate that all members have the exact same names and types
+    // TODO: ignore constant members and #place members
     for ti1_member: ti1.members {
         ti2_member := ti2.members[it_index];
         if (ti1_member.flags & .CONSTANT) != (ti2_member.flags & .CONSTANT)  return false;
