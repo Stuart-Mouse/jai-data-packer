@@ -194,12 +194,12 @@ remap_struct :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) ->
     
     for dst_member: dst_ti.members {
         if dst_member.flags & .CONSTANT  continue;
-        if dst_member.offset_in_bytes <= last_dst_member_offset  continue; // ignoring #place variables. Wish there were a better way to do this.
+        if dst_member.offset_in_bytes < last_dst_member_offset  continue; // ignoring #place variables. Wish there were a better way to do this.
         last_dst_member_offset = dst_member.offset_in_bytes;
         
         for src_member: src_ti.members {
             if src_member.flags & .CONSTANT  continue;
-            if src_member.offset_in_bytes <= last_src_member_offset  continue; // ignoring #place variables. Wish there were a better way to do this.
+            if src_member.offset_in_bytes < last_src_member_offset  continue; // ignoring #place variables. Wish there were a better way to do this.
             last_src_member_offset = src_member.offset_in_bytes;
             
             if dst_member.name == src_member.name {
