@@ -278,10 +278,9 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
                 // TODO: I dont think any of the pointer correcting logic will work until we change this logic
                 // We need to actually check ptr_ptr against a list of already adjusted pointers instead of this hacky method
                 derefed_offset := cast(u64) ptr_ptr.*;
-                print("adjusting ptr @ (%) % %\n", ptr_ptr, derefed_offset, debug_idents);
+                // print("adjusting ptr @ (%) % %\n", ptr_ptr, derefed_offset, debug_idents);
                 
                 if derefed_offset >= cast(u64) buffer.data {
-                    // print("data @ ptr was already unpacked\n");
                     assert(false, "pointer @ % was already adjusted!\n", ptr_ptr);
                     return true;
                 }
@@ -290,7 +289,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
                 // print("offset % -> ptr %\n", derefed_offset, ptr_ptr.*);
                 
                 if array_find(unpacked_offsets.*, cast(s64) derefed_offset) {
-                    print("data @ ptr was already unpacked\n");
+                    // print("data @ ptr was already unpacked\n");
                     return true;
                 }
                 
@@ -298,7 +297,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
                 
                 _data := recast_type_info(Any.{ type, ptr_ptr });
                 if type != _data.type {
-                    print("recast *Type_Info to %\n", (cast(*Type)*_data.type).*);
+                    // print("recast *Type_Info to %\n", (cast(*Type)*_data.type).*);
                 }
                 
                 ti_derefed := (cast(*Type_Info_Pointer)_data.type).pointer_to;

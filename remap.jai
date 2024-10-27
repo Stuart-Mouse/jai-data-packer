@@ -45,6 +45,7 @@ Conversion_Types :: enum_flags u64 {
     
     
     REMAP_STRUCT;
+    REMAP_UNION;    // currently hardcoded as unsupported
     REMAP_THROUGH_POINTER;
     RECAST_POINTER;
     
@@ -61,7 +62,8 @@ Conversion_Types :: enum_flags u64 {
 Conversion_Settings :: struct {
     allowed_conversions   : Conversion_Types;
     float_to_int_rounding : enum { TRUNCATE; FLOOR; CEIL; NEAREST; };
-    pointer_recast_procs  : [..] Pointer_Recast_Proc; // user can add new recasting procs here
+    pointer_recast_procs  : [..] struct { proc: Pointer_Recast_Proc; data: *void; };
+    get_union_type_procs  : [..] struct { proc: Get_Union_Type_Proc; data: *void; };
     
     // TODO: probably add some more in-depth rules for struct remapping.
     //       and probably allow overloading these on a per-struct basis
@@ -70,16 +72,24 @@ Conversion_Settings :: struct {
     //       better than notes would actually be just using the member data LUT thing I do in GON parser. (though this is still cope for not having structured notes)
 }
 
+#add_context data_conversion_settings: Conversion_Settings = DEFAULT_CONVERSION_SETTINGS;
+
 // the Any's passed in and out must be pointers
 // returns true if the Any has been recast, false if not
 // this is only for casting down to a more specific type (e.g.: casting a *Type_Info down to a *Type_Info_Enum)
-Pointer_Recast_Proc :: #type (any: Any) -> (Any, bool);
+Pointer_Recast_Proc :: #type (any: Any, data: *void) -> (Any, bool);
+Get_Union_Type_Proc :: #type (dst_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void) -> *Type_Info_Struct_Member;
+// TODO: generalized remap callback that will completely override remapping for a given dst type
+//       peraps that was even th emore wise/simple way to go for unions, but whatever
+//       if we did that generally for unions, we would have to always pass src_parent to remap_data
 
 // TODO: consider also casting up to more general type? This is more of something we can do in a LUT I think.
 
 // TODO: also consider what to do about procedure pointers
 //       maybe we can give user a way to store procedures as a string or enum value in data packer, then deconvert on parse?
-
+//       or we can use another flag to denote proc pointer in Packed_Pointer_Flags and let the user map other 32 bits to a proc pointer
+//       we may not need to use a bitflag in in packed pointer, since we can already differentiate pointer from procedure in type info.
+//       but maybe that's just easier anyhow?
 
 is_allowed :: inline (settings: Conversion_Settings, conversion_type: Conversion_Types) -> bool { 
     return settings.allowed_conversions & conversion_type == conversion_type;
@@ -101,12 +111,15 @@ DEFAULT_CONVERSION_SETTINGS :: Conversion_Settings.{
 // The most general remapping procedure. 
 // Handles any dst and src types and takes a Conversion_Settings, 
 //     which is passed down to other remap procedures recursively.
-remap_data :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> bool {
+// src_parent is used in union case to give context for user to resolve actual type
+remap_data :: (dst: Any, src: Any, settings := context.data_conversion_settings) -> bool {
     // for now we are not requiring that src subtype and dst subtype match up top
     // for the cases where this matters, we check those individually
     
+    // print("remapping % -> %\n", src.type.type, dst.type.type);
+    
     // TODO: handling for type info variant 
-    // TODO: maybe move handling for pointers up top
+    // TODO: maybe move handling for pointers up top 
     
     if dst.type.type == {
       case .STRING;
@@ -181,39 +194,189 @@ remap_struct :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) ->
     assert(dst.type.type == .STRUCT);
     
     if !is_allowed(settings, .REMAP_STRUCT) {
-        log_unsupported_conversion(.UNKNOWN_CONVERSION, "remap_struct");
+        log_unsupported_conversion(.REMAP_STRUCT, "remap_struct");
         return false;
     }
     
     dst_ti := cast(*Type_Info_Struct) dst.type;
     src_ti := cast(*Type_Info_Struct) src.type;
     
+    
+    // we can provide some instances of this proc type for common methods of disambiguationg union type
+    // e.g. one for Tagged_Union (polymorphic, or as Any), one for separate type tag, one for enum -> Type mapping table
+    // maybe even one using struct member note to determine tag for union
+    
+    
+    // if dst is a union, then we need to know which member ot use
+    // but the problem is we can only determine which member is set in src
+    // we also want to be able to go from any type to union if union contains compatible member?
+    //      but we also need some means to set dst tag from src?
+    // 
+    
+    /*
+        NOTE: ignoring #place struct members
+        
+        If we do not ignore #place members, we will end up doing a lot of duplicate work.
+        
+        I am not sure if we will ever have very nice handling for #place struct members, since they are highly problematic to remapping.
+        Generally, most #place members are used to provide an alternative way of accessing the data held in a struct, for example:
+            'xy' and 'yz' members in a Vector3
+            'floats' and 'coefs' members in a mat4
+        These are essentially 0-cost getters, or an alternativ einterface to the same underlying data.
+        
+        This is unlike a union, because a union is typically storing two different pieces of data in the same memory space.
+        I am sure there is probably some niche use case for #place where the members actually serve to encode unique data, but since it is uncommon, I have not really considered how to make affordances for that use case.
+    */
+    
+    
+    
+    // TODO: once we have union working, we can go back to using <= in the below #place checks
+    
+    // TODO: if src_union_member, then only match this one member to dst
+    
     // remap elements by name
     last_dst_member_offset := -1;
-    last_src_member_offset := -1;
-    
     for dst_member: dst_ti.members {
         if dst_member.flags & .CONSTANT  continue;
-        if dst_member.offset_in_bytes < last_dst_member_offset  continue; // ignoring #place variables. Wish there were a better way to do this.
+        if dst_member.offset_in_bytes < last_dst_member_offset  {
+            break; // ignoring #place members. Wish there were a better way to do this.
+        }
         last_dst_member_offset = dst_member.offset_in_bytes;
         
+        
+        last_src_member_offset := -1;
         for src_member: src_ti.members {
             if src_member.flags & .CONSTANT  continue;
-            if src_member.offset_in_bytes < last_src_member_offset  continue; // ignoring #place variables. Wish there were a better way to do this.
+            if src_member.offset_in_bytes < last_src_member_offset  {
+                break; // ignoring #place members. Wish there were a better way to do this.
+            }
             last_src_member_offset = src_member.offset_in_bytes;
             
             if dst_member.name == src_member.name {
-                remap_data(
-                    Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes }, 
-                    Any.{ src_member.type, src.value_pointer + src_member.offset_in_bytes }
-                );
-                break;
+                // print("remapping member % to %\n", src_member.name, dst_member.name);
+                
+                /*
+                    We have to handle unions here, since we have the context of them as struct members
+                    (unfortunately, because now we have a fat ass loop here)
+                
+                    if dst_member is union
+                        if src_member is union
+                            determine src type
+                            match member from src -> dst
+                        else
+                            if dst contains member of src type
+                            (in this case, we can't set any tag for dst (unless we wanted to have a callback for that, but that sounds horrible tbh))
+                    
+                    
+                    new problem
+                    
+                    we can't do a switch on type inside a user callback to determine parent struct type
+                    because this may be a dynamically loaded type info
+                    so then the only option is to do a compare on the struct name
+                        maybe that's just what we have to deal with, OR...
+                        (name compare is problematic especially for parameterized structs, but also just for name changes)
+                    
+                    maybe we should pass the dst type info as well, so the user can check that to figure what rule to apply
+                        then attempt to apply that rule to src data
+                        
+                    
+                    do we actually care to pass the src Type info struct member?
+                        does not seem to provide any useful additional data...
+                    
+                */
+                
+                dst_member_any := Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes };
+                src_member_any := Any.{ src_member.type, src.value_pointer + src_member.offset_in_bytes };
+                
+                if type_is_union(dst_member.type) {
+                    if !remap_union(dst_member_any, src_member_any, src, *src_member, settings)  {
+                        log("failed while remapping struct member (union) %!", dst_member.name);
+                        return false;
+                    }
+                } else {
+                    // TODO: what if src is union, but dst is not?
+                    if !remap_data(dst_member_any, src_member_any)  {
+                        log("failed while remapping struct member %!", dst_member.name);
+                        return false;
+                    }
+                }
+                
+                break src_member;
             }
         }
     }
     
     return true;
 }
+
+// union is just a struct where we want to only copy one member
+// if we map one union to another, we actually want to map by the name of union member
+// so we could just do a remap_struct, with an extra parameter for union_member, passing the 
+
+
+/*
+    Remapping Unions
+    
+    sometimes, the union itself contains all of the necessary information required to figure out the union should be treated as.
+    (e.g.: a union of Entity types where all members of union contain the same base type as first member)
+    
+    But, many times we require more context, either in the form of an external type tag or enum value.
+    If the parent_any is not provided, then 
+    
+    
+    The parent Any may not be provided in the user callback, so the user needs to be aware of this and handle this case.
+    src_member_ti will be provided if and only if src_parent is provided
+*/
+remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct_Member, settings := DEFAULT_CONVERSION_SETTINGS) -> bool {
+    assert(dst.type.type == .STRUCT);
+    dst_ti := cast(*Type_Info_Struct) dst.type;
+    assert(dst_ti.textual_flags & .UNION == .UNION);
+    
+    if !is_allowed(settings, .REMAP_UNION) {
+        log_unsupported_conversion(.REMAP_UNION, "remap_struct");
+        return false;
+    }
+    
+    // Maybe TODO
+    if !type_is_union(src.type) {
+        log("Error: Conversion from non-union type to union is not supported.");
+        return false;
+    }
+    
+    src_member: *Type_Info_Struct_Member;
+    for settings.get_union_type_procs {
+        src_member = it.proc(dst.type, src, src_parent, src_tism, it.data);
+        if src_member  break;
+    }
+    if !src_member  {
+        log("Error: failed to resolve src union type in remap_struct.");
+        return false;
+    }
+    assert(src_member.flags & .CONSTANT == 0);
+    
+    // search for dst member matching src member
+    last_dst_member_offset := -1;
+    for dst_member: dst_ti.members {
+        if dst_member.flags & .CONSTANT  continue;
+        if dst_member.name == src_member.name {
+            if !remap_data(
+                Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes }, 
+                Any.{ src_member.type, src.value_pointer + src_member.offset_in_bytes }
+            )  return false;
+            
+            return true;
+        }
+    }
+    
+    return true; // TODO?
+}
+
+
+
+type_is_union :: (ti: *Type_Info) -> bool {
+    return ti.type == .STRUCT && ((cast(*Type_Info_Struct)ti).textual_flags & .UNION);
+}
+
 
 /*
     What happens if we have some kind of change in type like
@@ -429,22 +592,23 @@ remap_enum :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> b
         }
         
         if dst_ti.enum_type_flags & .FLAGS {
-            // src_s64, dst_s64: s64;
-            // enum_to_int(src_s64, src);
+            src_s64, dst_s64: s64;
+            enum_to_int(src_s64, src);
             
-            // for src_ti.values {
-            //     if it & src_s64 == src_s64 {
-            //         src_name := src_ti.names[it_index];
-            //         for dst_ti.names {
-            //             if it == src_name {
-            //                 dst_s64 |= dst_ti.values[it_index];
-            //             }
-            //         }
-            //     }
-            // }
+            for src_ti.values {
+                if (it & src_s64) == it {
+                    src_name := src_ti.names[it_index];
+                    for dst_ti.names {
+                        if it == src_name {
+                            dst_s64 |= dst_ti.values[it_index];
+                            break;
+                        }
+                    }
+                }
+            }
             
-            // int_to_enum(dst, dst_s64);
-            // return true;
+            int_to_enum(dst, dst_s64);
+            return true;
         }
         else {
             src_s64: s64;
