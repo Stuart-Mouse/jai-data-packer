@@ -72,7 +72,9 @@ Conversion_Settings :: struct {
     //       better than notes would actually be just using the member data LUT thing I do in GON parser. (though this is still cope for not having structured notes)
 }
 
-#add_context data_conversion_settings: Conversion_Settings = DEFAULT_CONVERSION_SETTINGS;
+#add_context data_packer: struct { 
+    conversion_settings: Conversion_Settings = DEFAULT_CONVERSION_SETTINGS;
+};
 
 // the Any's passed in and out must be pointers
 // returns true if the Any has been recast, false if not
@@ -112,7 +114,9 @@ DEFAULT_CONVERSION_SETTINGS :: Conversion_Settings.{
 // Handles any dst and src types and takes a Conversion_Settings, 
 //     which is passed down to other remap procedures recursively.
 // src_parent is used in union case to give context for user to resolve actual type
-remap_data :: (dst: Any, src: Any, settings := context.data_conversion_settings) -> bool {
+remap_data :: (dst: Any, src: Any) -> bool {
+    settings := *context.data_packer.conversion_settings;
+
     // for now we are not requiring that src subtype and dst subtype match up top
     // for the cases where this matters, we check those individually
     
@@ -141,13 +145,13 @@ remap_data :: (dst: Any, src: Any, settings := context.data_conversion_settings)
         // currently, we only do struct -> struct
         // maybe in the future we will allow other types to coerce to structs
         if src.type.type != dst.type.type  return false; 
-        return remap_struct(dst, src, settings);
+        return remap_struct(dst, src);
         
       case .ENUM;
-        return remap_enum(dst, src, settings);
+        return remap_enum(dst, src);
         
       case .ARRAY;
-        return remap_array(dst, src, settings);
+        return remap_array(dst, src);
         
       case .POINTER;
         // two methods of copying pointers:
@@ -189,7 +193,9 @@ remap_data :: (dst: Any, src: Any, settings := context.data_conversion_settings)
     return true;
 }
 
-remap_struct :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> bool {
+remap_struct :: (dst: Any, src: Any) -> bool {
+    settings := *context.data_packer.conversion_settings;
+
     assert(src.type.type == .STRUCT);
     assert(dst.type.type == .STRUCT);
     
@@ -289,7 +295,7 @@ remap_struct :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) ->
                 src_member_any := Any.{ src_member.type, src.value_pointer + src_member.offset_in_bytes };
                 
                 if type_is_union(dst_member.type) {
-                    if !remap_union(dst_member_any, src_member_any, src, *src_member, settings)  {
+                    if !remap_union(dst_member_any, src_member_any, src, *src_member)  {
                         log("failed while remapping struct member (union) %!", dst_member.name);
                         return false;
                     }
@@ -327,7 +333,9 @@ remap_struct :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) ->
     The parent Any may not be provided in the user callback, so the user needs to be aware of this and handle this case.
     src_member_ti will be provided if and only if src_parent is provided
 */
-remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct_Member, settings := DEFAULT_CONVERSION_SETTINGS) -> bool {
+remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct_Member) -> bool {
+    settings := *context.data_packer.conversion_settings;
+    
     assert(dst.type.type == .STRUCT);
     dst_ti := cast(*Type_Info_Struct) dst.type;
     assert(dst_ti.textual_flags & .UNION == .UNION);
@@ -429,7 +437,9 @@ type_is_union :: (ti: *Type_Info) -> bool {
 
 // TODO: consider how allocators / allocations should work and what settings to implement
 // Shallow copy vs deep copy options?
-remap_array :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> bool {
+remap_array :: (dst: Any, src: Any) -> bool {
+    settings := *context.data_packer.conversion_settings;
+
     assert(dst.type.type == .ARRAY);
     // assert(src.type.type == .ARRAY); // src can sometimes be dst.element_type
     
@@ -559,7 +569,7 @@ remap_array :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> 
     // }
     
     for 0..min_count-1 {
-        if !remap_data(dst_elem_any, src_elem_any, settings) {
+        if !remap_data(dst_elem_any, src_elem_any) {
             log("Error: unable to remap data");
             return false;
         }
@@ -571,7 +581,9 @@ remap_array :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> 
 }
 
 // check if we are allowed do it by name, else do it by value
-remap_enum :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> bool { 
+remap_enum :: (dst: Any, src: Any) -> bool { 
+    settings := *context.data_packer.conversion_settings;
+
     assert(src.type.type == .ENUM);
     assert(dst.type.type == .ENUM);
     
@@ -648,7 +660,9 @@ remap_enum :: (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> b
     return true;
 }
 
-remap_int :: inline (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> bool {
+remap_int :: inline (dst: Any, src: Any) -> bool {
+    settings := *context.data_packer.conversion_settings;
+
     assert(dst.type.type == .INTEGER);
     
     if src.type.type == {
@@ -688,7 +702,9 @@ remap_int :: inline (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS
     return false;
 }
 
-remap_float :: inline (dst: Any, src: Any, settings := DEFAULT_CONVERSION_SETTINGS) -> bool {
+remap_float :: inline (dst: Any, src: Any) -> bool {
+    settings := *context.data_packer.conversion_settings;
+
     assert(dst.type.type == .FLOAT);
     
     if src.type.type == {
