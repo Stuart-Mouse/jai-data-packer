@@ -111,12 +111,10 @@ DEFAULT_CONVERSION_SETTINGS :: Conversion_Settings.{
 };
 
 // The most general remapping procedure. 
-// Handles any dst and src types and takes a Conversion_Settings, 
-//     which is passed down to other remap procedures recursively.
-// src_parent is used in union case to give context for user to resolve actual type
+// Handles any dst and src types.
 remap_data :: (dst: Any, src: Any) -> bool {
     settings := *context.data_packer.conversion_settings;
-
+    
     // for now we are not requiring that src subtype and dst subtype match up top
     // for the cases where this matters, we check those individually
     
@@ -133,7 +131,7 @@ remap_data :: (dst: Any, src: Any) -> bool {
         return true;
         
       case .BOOL;
-        return any_to_bool(dst, src);
+        return remap_bool(dst, src);
         
       case .INTEGER;
         return remap_int(dst, src);
@@ -814,6 +812,7 @@ bool_to_any :: (dst: Any, src: Any) -> bool {
     if dst.type.type == {
         case .BOOL;
             (cast(*bool)dst.value_pointer).* = (cast(*bool)src.value_pointer).*;
+            return true;
             
         case .ENUM; #through;
         case .INTEGER;
@@ -827,11 +826,12 @@ bool_to_any :: (dst: Any, src: Any) -> bool {
     return false;
 }
 
-any_to_bool :: (dst: Any, src: Any) -> bool {
+remap_bool :: (dst: Any, src: Any) -> bool {
     assert(dst.type.type == .BOOL);
     if src.type.type == {
       case .BOOL; 
         (cast(*bool)dst.value_pointer).* = (cast(*bool)src.value_pointer).*;
+        return true;
         
       case .ENUM; #through;
       case .INTEGER;
