@@ -449,6 +449,11 @@ Dynamic_New :: (ti: *Type_Info, initialized := true) -> *void {
     return memory;
 }
 
+Dynamic_New_Any :: inline (ti: *Type_Info, initialized := true) -> Any {
+    memory := Dynamic_New(ti, initialized);
+    return ifx memory then Any.{ ti, memory } else Any.{};
+}
+
 array_reserve_nonpoly :: (array: *Resizable_Array, desired_items: s64, elem_size: s64) {
     if desired_items <= array.allocated return;
     

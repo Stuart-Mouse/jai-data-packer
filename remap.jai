@@ -73,6 +73,8 @@ Conversion_Settings :: struct {
 }
 
 #add_context data_packer: struct { 
+    // is it potentially problematic to have the dynamic arrays for callback procs in the context ?
+    // seems likely that one could forget to free these arrays if they do a push context...
     conversion_settings: Conversion_Settings = DEFAULT_CONVERSION_SETTINGS;
 };
 
@@ -1051,6 +1053,90 @@ are_structs_equivalent :: (ti1: *Type_Info_Struct, ti2: *Type_Info_Struct) -> bo
     
     return true;
 }
+
+
+
+
+
+
+/*
+    resolve union by tag
+    
+    we need to have a *void for data so that we can attach some lookup table 
+        to map from tag value to union member name
+    
+    we can also write a proc to generate the lookup Resolve_Union_By_Tag_Data for Tagged_Union
+*/
+resolve_union_by_tag : Get_Union_Type_Proc : (
+    dst_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void
+) -> *Type_Info_Struct_Member {
+    user_data := cast(*Resolve_Union_By_Tag_Data) data;
+    
+    if dst_ti != user_data.dst_type  return null;
+    if !src_parent.value_pointer  return null;
+    if !data  return null;
+    
+    src_ti := cast(*Type_Info_Struct) src.type;
+    assert(src_ti.type == .STRUCT);
+    assert(src_ti.textual_flags & .UNION == .UNION);
+    
+    dst_tag: s64;
+    // TODO: probably change ot get_field, so that we recurse on using'd fields. This could turn out to have pitfalls, but seems more versatile atm. so IDK
+    src_tag := get_member_any(src_parent, user_data.tag_member_name);
+    if !remap_data(Any.{ xx user_data.tag_type, *dst_tag }, src_tag)  return null;
+    
+    src_member_name: string;
+    for user_data.lookup {
+        if it.tag_value == dst_tag {
+            src_member_name = it.member_name;
+            break;
+        }
+    }
+    if !src_member_name  return null;
+    
+    for *src_member: src_ti.members {
+        if src_member.flags & .CONSTANT  continue;
+        if src_member.name == src_member_name {
+            return src_member;
+        }
+    }
+    
+    return null;
+}
+
+Resolve_Union_By_Tag_Data :: struct {
+    tag_member_name : string;
+    tag_type        : *Type_Info_Enum;
+    dst_type        : *Type_Info;
+    lookup          : [] struct { tag_value: s64; member_name: string; };
+}
+
+get_member_any :: (parent: Any, member_name: string) -> Any {
+    assert(parent.type.type == .STRUCT);
+    
+    parent_ti := cast(*Type_Info_Struct) parent.type;
+    
+    member: *Type_Info_Struct_Member;
+    for *parent_ti.members {
+        if it.name == member_name {
+            member = it;
+            break;
+        }
+    }
+    
+    assert(member != null, "Invalid member name!");
+    
+    return get_member_any(parent.value_pointer, member);
+}
+
+get_member_any :: (parent_ptr: *void, member_ti: *Type_Info_Struct_Member) -> Any {
+    if !member_ti  return Any.{};
+    value_pointer := parent_ptr + member_ti.offset_in_bytes;
+    return Any.{ member_ti.type, value_pointer };
+}
+
+
+
 
 
 #scope_module
