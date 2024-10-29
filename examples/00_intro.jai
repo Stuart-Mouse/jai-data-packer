@@ -40,13 +40,13 @@ Fruit_Facts :: union {
 
 main :: () {
     
-    resolve_fruit_union_data :: Resolve_Union_By_Tag_Data.{ "fruit", type_info(Fruit), .[
+    resolve_fruit_union_data := Resolve_Union_By_Tag_Data.{ "fruit", type_info(Fruit), cast(*Type_Info) Fruit_Facts, .[
         .{ xx Fruit.APPLE,  "apple"  },
         .{ xx Fruit.PEAR,   "pear"   },
         .{ xx Fruit.BANANA, "banana" },
     ]};
     
-    array_add(*context.data_conversion_settings.get_union_type_procs, .{ resolve_union_by_tag, *resolve_fruit_union_data });
+    array_add(*context.data_packer.conversion_settings.get_union_type_procs, .{ resolve_union_by_tag, *resolve_fruit_union_data });
     
     
     {
@@ -165,98 +165,3 @@ main :: () {
     }
 }
 
-
-/*
-    resolve union by tag
-    
-    we need to have a *void for data so that we can attach some lookup table 
-        to map from tag value to union member name
-    
-    we can also write a proc to generate the lookup Resolve_Union_By_Tag_Data for Tagged_Union
-*/
-resolve_union_by_tag : Get_Union_Type_Proc : (
-    dst_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void
-) -> *Type_Info_Struct_Member {
-    if dst_ti != cast(*Type_Info) Fruit_Facts  return null;
-    if !src_parent.value_pointer  return null;
-    if !data  return null;
-    
-    user_data := cast(*Resolve_Union_By_Tag_Data) data;
-    
-    src_ti := cast(*Type_Info_Struct) src.type;
-    assert(src_ti.type == .STRUCT);
-    assert(src_ti.textual_flags & .UNION == .UNION);
-    
-    dst_tag: s64;
-    src_tag := get_member_any(src_parent, user_data.tag_member_name);
-    if !remap_data(Any.{ xx user_data.tag_type, *dst_tag }, src_tag)  return null;
-    
-    src_member_name: string;
-    for user_data.lookup {
-        if it.tag_value == dst_tag {
-            src_member_name = it.member_name;
-            break;
-        }
-    }
-    if !src_member_name  return null;
-    
-    for *src_member: src_ti.members {
-        if src_member.flags & .CONSTANT  continue;
-        if src_member.name == src_member_name {
-            return src_member;
-        }
-    }
-    
-    return null;
-}
-
-Resolve_Union_By_Tag_Data :: struct {
-    tag_member_name: string;
-    tag_type: *Type_Info_Enum;
-    lookup: [] struct { tag_value: s64; member_name: string; };
-}
-
-get_member_any :: (parent: Any, member_name: string) -> Any {
-    assert(parent.type.type == .STRUCT);
-    
-    parent_ti := cast(*Type_Info_Struct) parent.type;
-    
-    member: *Type_Info_Struct_Member;
-    for *parent_ti.members {
-        if it.name == member_name {
-            member = it;
-            break;
-        }
-    }
-    
-    assert(member != null, "Invalid member name!");
-    
-    return get_member_any(parent.value_pointer, member);
-}
-
-get_member_any :: (parent_ptr: *void, member_ti: *Type_Info_Struct_Member) -> Any {
-    value_pointer := parent_ptr + member_ti.offset_in_bytes;
-    return Any.{ member_ti.type, value_pointer };
-}
-
-Dynamic_New_Any :: (ti: *Type_Info, initialized := true) -> Any {
-    size := ti.runtime_size;
-    if size < 0 return null;   // Maybe they gave us a weird polymorphic type for some reason.
-
-    memory := alloc(size);
-
-    if initialized {
-        if ti.type == .STRUCT {
-            // Structs can have initializers. If the initializer is null, the struct is to be zeroed.
-            tis := cast(*Type_Info_Struct) ti;
-            if tis.initializer  tis.initializer(memory);
-            else                memset(memory, 0, size);
-        } else {
-            // Non-structs always default to 0.
-            // @Incomplete: Here we are not handling variants, or arrays of things that might have initializers.
-            memset(memory, 0, size);
-        }
-    }
-
-    return Any.{ ti, memory };
-}

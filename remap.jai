@@ -72,10 +72,8 @@ Conversion_Settings :: struct {
     //       better than notes would actually be just using the member data LUT thing I do in GON parser. (though this is still cope for not having structured notes)
 }
 
-#add_context data_packer: struct { 
-    // is it potentially problematic to have the dynamic arrays for callback procs in the context ?
-    // seems likely that one could forget to free these arrays if they do a push context...
-    conversion_settings: Conversion_Settings = DEFAULT_CONVERSION_SETTINGS;
+#add_context data_packer: struct {
+    conversion_settings: *Conversion_Settings = *default_conversion_settings; // by pointer so that user can switch out conversion settings trivially
 };
 
 // the Any's passed in and out must be pointers
@@ -95,8 +93,8 @@ Get_Union_Type_Proc :: #type (dst_ti: *Type_Info, src: Any, src_parent: Any, src
 //       we may not need to use a bitflag in in packed pointer, since we can already differentiate pointer from procedure in type info.
 //       but maybe that's just easier anyhow?
 
-is_allowed :: inline (settings: Conversion_Settings, conversion_type: Conversion_Types) -> bool { 
-    return settings.allowed_conversions & conversion_type == conversion_type;
+is_allowed :: inline (conversion_type: Conversion_Types) -> bool { 
+    return context.data_packer.conversion_settings.allowed_conversions & conversion_type == conversion_type;
 }
 
 log_disallowed_conversion :: inline (conversion: Conversion_Types, proc_name: string) {
@@ -107,10 +105,15 @@ log_unsupported_conversion :: inline (conversion: Conversion_Types, proc_name: s
     log("Error: unsupported conversion % in %", conversion, proc_name);
 }
 
+default_conversion_settings := DEFAULT_CONVERSION_SETTINGS;
 DEFAULT_CONVERSION_SETTINGS :: Conversion_Settings.{
     allowed_conversions   = .ALL,
     float_to_int_rounding = .TRUNCATE,
 };
+
+
+
+
 
 // The most general remapping procedure. 
 // Handles any dst and src types.
@@ -133,7 +136,7 @@ remap_data :: (dst: Any, src: Any) -> bool {
         return true;
         
       case .BOOL;
-        return remap_bool(dst, src);
+        return any_to_bool(dst, src);
         
       case .INTEGER;
         return remap_int(dst, src);
@@ -199,7 +202,7 @@ remap_struct :: (dst: Any, src: Any) -> bool {
     assert(src.type.type == .STRUCT);
     assert(dst.type.type == .STRUCT);
     
-    if !is_allowed(settings, .REMAP_STRUCT) {
+    if !is_allowed(.REMAP_STRUCT) {
         log_unsupported_conversion(.REMAP_STRUCT, "remap_struct");
         return false;
     }
@@ -259,7 +262,7 @@ remap_struct :: (dst: Any, src: Any) -> bool {
             last_src_member_offset = src_member.offset_in_bytes;
             
             if dst_member.name == src_member.name {
-                // print("remapping member % to %\n", src_member.name, dst_member.name);
+                // print("remapping member % to % (%)\n", src_member.name, dst_member.name, type_info_to_type(dst_member.type));
                 
                 /*
                     We have to handle unions here, since we have the context of them as struct members
@@ -334,13 +337,13 @@ remap_struct :: (dst: Any, src: Any) -> bool {
     src_member_ti will be provided if and only if src_parent is provided
 */
 remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct_Member) -> bool {
-    settings := *context.data_packer.conversion_settings;
+    settings := context.data_packer.conversion_settings;
     
     assert(dst.type.type == .STRUCT);
     dst_ti := cast(*Type_Info_Struct) dst.type;
     assert(dst_ti.textual_flags & .UNION == .UNION);
     
-    if !is_allowed(settings, .REMAP_UNION) {
+    if !is_allowed(.REMAP_UNION) {
         log_unsupported_conversion(.REMAP_UNION, "remap_struct");
         return false;
     }
@@ -357,8 +360,8 @@ remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct
         if src_member  break;
     }
     if !src_member  {
-        log("Error: failed to resolve src union type in remap_struct.");
-        return false;
+        log("Warning: failed to resolve union member in remap_struct.");
+        return true;
     }
     assert(src_member.flags & .CONSTANT == 0);
     
@@ -498,7 +501,7 @@ remap_array :: (dst: Any, src: Any) -> bool {
         }
     }
     
-    if !is_allowed(settings, conversion_type) {
+    if !is_allowed(conversion_type) {
         if conversion_type 
             then log_disallowed_conversion(conversion_type, "remap_array");
             else log_unsupported_conversion(conversion_type, "remap_array");
@@ -592,7 +595,7 @@ remap_enum :: (dst: Any, src: Any) -> bool {
     
     // TODO: should we skip this if both src and dst are #specified?
     conversion := Conversion_Types.ENUM_BY_NAME;
-    if is_allowed(settings, conversion) {
+    if is_allowed(conversion) {
         // TODO: This doesn't really handle enum_flags at all!
         // TODO: find out if int_to_int could cause issues with u64 -> s64 here
         
@@ -651,7 +654,7 @@ remap_enum :: (dst: Any, src: Any) -> bool {
     
     conversion = .ENUM_BY_VALUE;
     if is_narrowing_int(dst_ti.internal_type, src_ti.internal_type)  conversion |= .INT_NARROWING;
-    if !is_allowed(settings, conversion) {
+    if !is_allowed(conversion) {
         log_disallowed_conversion(conversion, "remap_enum");
         return false;
     }
@@ -669,7 +672,7 @@ remap_int :: inline (dst: Any, src: Any) -> bool {
       case .ENUM; 
         conversion := Conversion_Types.ENUM_TO_INT;
         if is_narrowing_int(xx dst.type, (cast(*Type_Info_Enum)src.type).internal_type)  conversion |= .INT_NARROWING;
-        if !is_allowed(settings, conversion) {
+        if !is_allowed(conversion) {
             log_disallowed_conversion(conversion, "remap_int");
             return false;
         }
@@ -679,7 +682,7 @@ remap_int :: inline (dst: Any, src: Any) -> bool {
       case .INTEGER;
         conversion := Conversion_Types.INT_TO_INT;
         if is_narrowing_int(xx dst.type, xx src.type)  conversion |= .INT_NARROWING;
-        if !is_allowed(settings, conversion) {
+        if !is_allowed(conversion) {
             log_disallowed_conversion(conversion, "remap_int");
             return false;
         }
@@ -688,7 +691,7 @@ remap_int :: inline (dst: Any, src: Any) -> bool {
         
       case .FLOAT; 
         conversion := Conversion_Types.FLOAT_TO_INT;
-        if !is_allowed(settings, conversion) {
+        if !is_allowed(conversion) {
             log_disallowed_conversion(conversion, "remap_int");
             return false;
         }
@@ -710,7 +713,7 @@ remap_float :: inline (dst: Any, src: Any) -> bool {
     if src.type.type == {
       case .ENUM; 
         conversion := Conversion_Types.ENUM_TO_FLOAT;
-        if !is_allowed(settings, conversion) {
+        if !is_allowed(conversion) {
             log_disallowed_conversion(conversion, "remap_float");
             return false;
         }
@@ -719,7 +722,7 @@ remap_float :: inline (dst: Any, src: Any) -> bool {
         
       case .INTEGER;
         conversion := Conversion_Types.INT_TO_FLOAT;
-        if !is_allowed(settings, conversion) {
+        if !is_allowed(conversion) {
             log_disallowed_conversion(conversion, "remap_float");
             return false;
         }
@@ -729,7 +732,7 @@ remap_float :: inline (dst: Any, src: Any) -> bool {
       case .FLOAT; 
         conversion := Conversion_Types.FLOAT_TO_FLOAT;
         if is_narrowing_float(xx dst.type, xx src.type)  conversion |= .FLOAT_NARROWING;
-        if !is_allowed(settings, conversion) {
+        if !is_allowed(conversion) {
             log_disallowed_conversion(conversion, "remap_float");
             return false;
         }
@@ -812,23 +815,27 @@ remap_float :: inline (dst: Any, src: Any) -> bool {
 bool_to_any :: (dst: Any, src: Any) -> bool {
     assert(src.type.type == .BOOL);
     if dst.type.type == {
-        case .BOOL;
-            (cast(*bool)dst.value_pointer).* = (cast(*bool)src.value_pointer).*;
-            return true;
-            
-        case .ENUM; #through;
-        case .INTEGER;
-            memset(src.value_pointer, 0, src.type.runtime_size);
-            (cast(*bool)src.value_pointer).* = (cast(*bool)dst.value_pointer).*; // NOTE: little endian assumed?
-            return true;
-            
-        // case .FLOAT;
-            // TODO: implement bool to float
+      case .BOOL;
+        (cast(*bool)dst.value_pointer).* = (cast(*bool)src.value_pointer).*;
+        return true;
+        
+      case .ENUM; #through;
+      case .INTEGER;
+        memset(src.value_pointer, 0, src.type.runtime_size);
+        (cast(*bool)src.value_pointer).* = (cast(*bool)dst.value_pointer).*; // NOTE: little endian assumed?
+        return true;
+        
+      case .FLOAT;
+        f64_value: float64 = ifx (cast(*bool)src.value_pointer).* then 1.0 else 0.0;
+        if dst.type.runtime_size == {
+          case 4; (cast(*float32)src.value_pointer).* = cast(float32) f64_value;
+          case 8; (cast(*float64)src.value_pointer).* = cast(float64) f64_value;
+        }
     }
     return false;
 }
 
-remap_bool :: (dst: Any, src: Any) -> bool {
+any_to_bool :: (dst: Any, src: Any) -> bool {
     assert(dst.type.type == .BOOL);
     if src.type.type == {
       case .BOOL; 
@@ -847,17 +854,18 @@ remap_bool :: (dst: Any, src: Any) -> bool {
         }
         return true;
         
-      case .FLOAT; // TODO: do we really even want to have float/bool conversions?
-      //   f64_value: float64;
-      //   if src.type.runtime_size == {
-      //     case 4; f64_value = cast(float64) (cast(*float32)src.value_pointer).*;
-      //     case 8; f64_value = cast(float64) (cast(*float64)src.value_pointer).*;
-      //   }
-      //   if f64_value  (cast(*bool)dst.value_pointer).* = true;
-      //   return true;
+      case .FLOAT;
+        f64_value: float64;
+        if src.type.runtime_size == {
+          case 4; f64_value = cast(float64) (cast(*float32)src.value_pointer).*;
+          case 8; f64_value = cast(float64) (cast(*float64)src.value_pointer).*;
+        }
+        if f64_value  (cast(*bool)dst.value_pointer).* = true;
+        return true;
     }
     return false;
 }
+
 
 is_narrowing_int :: (dst_ti: *Type_Info_Integer, src_ti: *Type_Info_Integer) -> bool {
     if src_ti.runtime_size > dst_ti.runtime_size  return true;
@@ -1072,6 +1080,8 @@ resolve_union_by_tag : Get_Union_Type_Proc : (
 ) -> *Type_Info_Struct_Member {
     user_data := cast(*Resolve_Union_By_Tag_Data) data;
     
+    log("dst_type: %", type_info_to_type(user_data.dst_type));
+    
     if dst_ti != user_data.dst_type  return null;
     if !src_parent.value_pointer  return null;
     if !data  return null;
@@ -1081,8 +1091,7 @@ resolve_union_by_tag : Get_Union_Type_Proc : (
     assert(src_ti.textual_flags & .UNION == .UNION);
     
     dst_tag: s64;
-    // TODO: probably change ot get_field, so that we recurse on using'd fields. This could turn out to have pitfalls, but seems more versatile atm. so IDK
-    src_tag := get_member_any(src_parent, user_data.tag_member_name);
+    src_tag := get_member_any(src_parent.value_pointer, get_field(xx src_parent.type, user_data.tag_member_name));
     if !remap_data(Any.{ xx user_data.tag_type, *dst_tag }, src_tag)  return null;
     
     src_member_name: string;
@@ -1123,8 +1132,7 @@ get_member_any :: (parent: Any, member_name: string) -> Any {
             break;
         }
     }
-    
-    assert(member != null, "Invalid member name!");
+    if !member  return Any.{};
     
     return get_member_any(parent.value_pointer, member);
 }
