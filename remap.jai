@@ -860,7 +860,7 @@ any_to_bool :: (dst: Any, src: Any) -> bool {
           case 4; f64_value = cast(float64) (cast(*float32)src.value_pointer).*;
           case 8; f64_value = cast(float64) (cast(*float64)src.value_pointer).*;
         }
-        if f64_value  (cast(*bool)dst.value_pointer).* = true;
+        if f64_value then (cast(*bool)dst.value_pointer).* = true;
         return true;
     }
     return false;
