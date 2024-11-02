@@ -4,6 +4,8 @@ build/
 *.pdb
 *.raddbgi
 *.rdi
+*.dat
+*.ti
 
 notes.md
 examples/test.jai
