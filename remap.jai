@@ -935,15 +935,15 @@ float_to_int :: (dst: Any, src: Any) {
     assert(dst.type.type == .INTEGER);
     
     s64_value: s64;
-    if dst.type.runtime_size == {
-        case 4; s64_value = cast(s64) (cast(*float32)dst.value_pointer).*;
-        case 8; s64_value = cast(s64) (cast(*float64)dst.value_pointer).*;
-    }
     if src.type.runtime_size == {
-        case 1; (cast(*s8 )src.value_pointer).* = cast(s8 ) s64_value;
-        case 2; (cast(*s16)src.value_pointer).* = cast(s16) s64_value;
-        case 4; (cast(*s32)src.value_pointer).* = cast(s32) s64_value;
-        case 8; (cast(*s64)src.value_pointer).* = cast(s64) s64_value;
+        case 4; s64_value = cast(s64) (cast(*float32)src.value_pointer).*;
+        case 8; s64_value = cast(s64) (cast(*float64)src.value_pointer).*;
+    }
+    if dst.type.runtime_size == {
+        case 1; (cast(*s8 )dst.value_pointer).* = cast(s8 ) s64_value;
+        case 2; (cast(*s16)dst.value_pointer).* = cast(s16) s64_value;
+        case 4; (cast(*s32)dst.value_pointer).* = cast(s32) s64_value;
+        case 8; (cast(*s64)dst.value_pointer).* = cast(s64) s64_value;
     }
 }
 
