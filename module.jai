@@ -204,7 +204,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
     
     buffer: [] u8;
     pointer_map: Table(*void, s64);
-    defer deinit(*pointer_map)
+    defer deinit(*pointer_map);
     
     array_resize(*buffer, data.type.runtime_size);
     if !recurse(data, *buffer, 0, *pointer_map) {
