@@ -31,7 +31,7 @@ pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data
             return false;
         }
         
-        ok = write_entire_file(type_info_file_path, cast(string) data);
+        ok = write_entire_file(type_info_file_path, data.(string));
         if !ok {
             log("Failed to write type info to file!\n");
             return false;
@@ -46,7 +46,7 @@ pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data
             return false;
         }
         
-        ok = write_entire_file(file_path, cast(string) data);
+        ok = write_entire_file(file_path, data.(string));
         if !ok {
             log("Failed to write data to file!\n");
             return false;
@@ -65,7 +65,7 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
     print("unpacking %\n", type_info_file_path);
     ti_any:, ok = unpack_data(
         type_info(*Type_Info), 
-        cast(*[]u8) *ti_file
+        (*ti_file).(*[]u8)
     );
     if !ok  return false;
     
@@ -75,8 +75,8 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
     
     print("unpacking %\n", file_path);
     data_any:, ok = unpack_data(
-        (cast(**Type_Info) ti_any.value_pointer).*,
-        cast(*[]u8) *data_file
+        ti_any.value_pointer.(**Type_Info).*,
+        (*data_file).(*[]u8)
     );
     if !ok  return false;
     
@@ -102,7 +102,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
         
         if data.type.type == {
           case .STRUCT;
-            ti_struct := cast(*Type_Info_Struct) data.type;
+            ti_struct := data.type.(*Type_Info_Struct);
             for ti_struct.members {
                 member_any := Any.{ it.type, data.value_pointer + it.offset_in_bytes };
                 if !recurse(member_any, buffer, write_offset + it.offset_in_bytes, pointer_map) {
@@ -116,9 +116,9 @@ pack_data :: (data: Any) -> ([] u8, bool) {
             src_data    : *void = ---; // base pointer for source data
             elem_count  : int   = ---;
             
-            ti_array := cast(*Type_Info_Array) data.type;
+            ti_array := data.type.(*Type_Info_Array);
             if ti_array.array_type != .FIXED {
-                raw_array  := (cast(*Resizable_Array) data.value_pointer).*;
+                raw_array  := data.value_pointer.(*Resizable_Array).*;
                 src_data    = raw_array.data;
                 elem_count  = raw_array.count;
                 data_offset = buffer.count; // elements will be written to end of buffer
@@ -151,7 +151,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
             memcpy(*(buffer.data[write_offset]), data.value_pointer, data.type.runtime_size);
           
           case .STRING;
-            str     := (cast(*string) data.value_pointer).*;
+            str     := data.value_pointer.(*string).*;
             str_dst := buffer.count;
             
             // print("Writing string data at offset %\n", str_dst);
@@ -163,7 +163,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
             
           case .POINTER;
             #assert(size_of(*void) == size_of(s64));
-            raw_pointer := (cast(**void)data.value_pointer).*;
+            raw_pointer := data.value_pointer.(**void).*;
             if raw_pointer == null {
                 memset(*buffer.data[write_offset], 0, size_of(*void));
                 return true;
@@ -175,7 +175,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
                 // print("recast *Type_Info to %\n", (cast(*Type)*_data.type).*);
             }
             
-            ti_derefed := (cast(*Type_Info_Pointer)_data.type).pointer_to;
+            ti_derefed := _data.type.(*Type_Info_Pointer).pointer_to;
         
             ptr_offset, found := table_find(pointer_map, raw_pointer);
             if !found {
@@ -226,7 +226,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
         
         if type.type == {
           case .STRUCT;
-            ti_struct := cast(*Type_Info_Struct) type;
+            ti_struct := type.(*Type_Info_Struct);
             for ti_struct.members {
                 array_add(*debug_idents, it.name);
                 if !recurse(it.type, buffer, offset + it.offset_in_bytes, unpacked_offsets) {
@@ -240,10 +240,10 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
             data_offset : s64 = ---;
             elem_count  : int = ---;
             
-            ti_array := cast(*Type_Info_Array) type;
+            ti_array := type.(*Type_Info_Array);
             if ti_array.array_type != .FIXED {
-                raw_array  := cast(*Resizable_Array) *buffer.data[offset];
-                if cast(u64) raw_array.data >= cast(u64) buffer.data {
+                raw_array  := (*buffer.data[offset]).(*Resizable_Array);
+                if raw_array.data.(u64) >= buffer.data.(u64) {
                     // print("array data pointer was already adjusted...\n");
                     return true;
                 }
@@ -266,22 +266,22 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
             }
             
           case .STRING;
-            str := (cast(*string) *buffer.data[offset]);
-            if cast(u64) str.data >= cast(u64) buffer.data {
+            str := (*buffer.data[offset]).(*string);
+            if str.data.(u64) >= buffer.data.(u64) {
                 // print("string data pointer was already adjusted...\n");
                 return true;
             }
-            str.data = xx (buffer.data + cast(s64) str.data);
+            str.data = xx (buffer.data + str.data.(s64));
             
           case .POINTER;
-            ptr_ptr := (cast(**void) *buffer.data[offset]);
+            ptr_ptr := (*buffer.data[offset]).(**void);
             if ptr_ptr.* != null {
                 // TODO: I dont think any of the pointer correcting logic will work until we change this logic
                 // We need to actually check ptr_ptr against a list of already adjusted pointers instead of this hacky method
-                derefed_offset := cast(u64) ptr_ptr.*;
+                derefed_offset := ptr_ptr.(*u64).*;
                 // print("adjusting ptr @ (%) % %\n", ptr_ptr, derefed_offset, debug_idents);
                 
-                if derefed_offset >= cast(u64) buffer.data {
+                if derefed_offset >= buffer.data.(u64) {
                     assert(false, "pointer @ % was already adjusted!\n", ptr_ptr);
                     return true;
                 }
@@ -289,20 +289,20 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
                 ptr_ptr.* = xx (buffer.data + derefed_offset);
                 // print("offset % -> ptr %\n", derefed_offset, ptr_ptr.*);
                 
-                if array_find(unpacked_offsets.*, cast(s64) derefed_offset) {
+                if array_find(unpacked_offsets.*, derefed_offset.(s64)) {
                     // print("data @ ptr was already unpacked\n");
                     return true;
                 }
                 
-                array_add(unpacked_offsets, cast(s64) derefed_offset);
+                array_add(unpacked_offsets, derefed_offset.(s64));
                 
                 _data := recast_type_info(Any.{ type, ptr_ptr });
                 if type != _data.type {
                     // print("recast *Type_Info to %\n", (cast(*Type)*_data.type).*);
                 }
                 
-                ti_derefed := (cast(*Type_Info_Pointer)_data.type).pointer_to;
-                if !recurse(ti_derefed, buffer, cast(s64) derefed_offset, unpacked_offsets) {
+                ti_derefed := _data.type.(*Type_Info_Pointer).pointer_to;
+                if !recurse(ti_derefed, buffer, derefed_offset.(s64), unpacked_offsets) {
                     print("Error while unpacking data through pointer.\n");
                     return false;
                 }
@@ -382,25 +382,25 @@ resolve_common_type_info_pointer : Resolve_Local_Pointer_Proc :
 {
     if !is_type_info_subtype(pointer_to)  return null, false;
     
-    ti_id := cast(Common_Type_Infos) (packed_pointer & cast(u64) Packed_Pointer_Masks.DATA_OFFSET);
+    ti_id := (packed_pointer & Packed_Pointer_Masks.DATA_OFFSET.(u64)).(Common_Type_Infos);
     
     // if ti_id is not one of our enumerated values, then we can't resolve it
     if !array_find(type_info(Common_Type_Infos).values, ti_id)  return null, false;
     
     if #complete ti_id == {
-        case .VOID   ; return void;
-        case .U8     ; return u8;
-        case .S8     ; return s8;
-        case .U16    ; return u16;
-        case .S16    ; return s16;
-        case .U32    ; return u32;
-        case .S32    ; return s32;
-        case .U64    ; return u64;
-        case .S64    ; return s64;
-        case .F32    ; return float32;
-        case .F64    ; return float64;
-        case .BOOL   ; return bool;
-        case .STRING ; return string;
+        case .VOID;     return void;
+        case .U8;       return u8;
+        case .S8;       return s8;
+        case .U16;      return u16;
+        case .S16;      return s16;
+        case .U32;      return u32;
+        case .S32;      return s32;
+        case .U64;      return u64;
+        case .S64;      return s64;
+        case .F32;      return float32;
+        case .F64;      return float64;
+        case .BOOL;     return bool;
+        case .STRING;   return string;
     }
     
     return null, false;
@@ -408,17 +408,17 @@ resolve_common_type_info_pointer : Resolve_Local_Pointer_Proc :
 
 is_type_info_subtype :: (ti: *Type_Info) -> bool {
     if ti == {
-      case type_info(Type_Info); return true;
-      case type_info(Type_Info_Integer); return true;
-      case type_info(Type_Info_Float); return true;
-      case type_info(Type_Info_Enum); return true;
-      case type_info(Type_Info_Bool); return true;
-      case type_info(Type_Info_String); return true;
-      case type_info(Type_Info_Struct); return true;
-      case type_info(Type_Info_Struct_Member); return true;
-      case type_info(Type_Info_Array); return true;
-      case type_info(Type_Info_Procedure); return true;
-      case type_info(Type_Info_Pointer); return true;
+      case type_info(Type_Info);                return true;
+      case type_info(Type_Info_Integer);        return true;
+      case type_info(Type_Info_Float);          return true;
+      case type_info(Type_Info_Enum);           return true;
+      case type_info(Type_Info_Bool);           return true;
+      case type_info(Type_Info_String);         return true;
+      case type_info(Type_Info_Struct);         return true;
+      case type_info(Type_Info_Struct_Member);  return true;
+      case type_info(Type_Info_Array);          return true;
+      case type_info(Type_Info_Procedure);      return true;
+      case type_info(Type_Info_Pointer);        return true;
     }
     return false;
 }
@@ -437,7 +437,7 @@ Dynamic_New :: (ti: *Type_Info, initialized := true) -> *void {
     if initialized {
         if ti.type == .STRUCT {
             // Structs can have initializers. If the initializer is null, the struct is to be zeroed.
-            tis := cast(*Type_Info_Struct) ti;
+            tis := ti.(*Type_Info_Struct);
             if tis.initializer  tis.initializer(memory);
             else                memset(memory, 0, size);
         } else {

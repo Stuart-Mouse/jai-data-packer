@@ -132,7 +132,7 @@ remap_data :: (dst: Any, src: Any) -> bool {
       case .STRING;
         if src.type.type != dst.type.type  return false; 
         // TODO: we would like to have an option as to whether this should copy
-        (cast(*string) dst.value_pointer).* = copy_string((cast(*string) src.value_pointer).*);
+        dst.value_pointer.(*string).* = copy_string(src.value_pointer.(*string).*);
         return true;
         
       case .BOOL;
@@ -184,7 +184,7 @@ remap_data :: (dst: Any, src: Any) -> bool {
         dst_derefed := deref_any_pointer(dst);
         if dst_derefed.value_pointer == null {
             dst_derefed.value_pointer = Dynamic_New(dst_derefed.type);
-            (cast(**void)dst.value_pointer).* = dst_derefed.value_pointer;
+            dst.value_pointer.(**void).* = dst_derefed.value_pointer;
         }
         
         // if this fails, we should deallocate the dynamic_new'd item
@@ -207,8 +207,8 @@ remap_struct :: (dst: Any, src: Any) -> bool {
         return false;
     }
     
-    dst_ti := cast(*Type_Info_Struct) dst.type;
-    src_ti := cast(*Type_Info_Struct) src.type;
+    dst_ti := dst.type.(*Type_Info_Struct);
+    src_ti := src.type.(*Type_Info_Struct);
     
     
     // we can provide some instances of this proc type for common methods of disambiguationg union type
@@ -340,7 +340,7 @@ remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct
     settings := context.data_packer.conversion_settings;
     
     assert(dst.type.type == .STRUCT);
-    dst_ti := cast(*Type_Info_Struct) dst.type;
+    dst_ti := dst.type.(*Type_Info_Struct);
     assert(dst_ti.textual_flags & .UNION == .UNION);
     
     if !is_allowed(.REMAP_UNION) {
@@ -385,7 +385,7 @@ remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct
 
 
 type_is_union :: (ti: *Type_Info) -> bool {
-    return ti.type == .STRUCT && ((cast(*Type_Info_Struct)ti).textual_flags & .UNION);
+    return ti.type == .STRUCT && (ti.(*Type_Info_Struct).textual_flags & .UNION);
 }
 
 
@@ -448,8 +448,8 @@ remap_array :: (dst: Any, src: Any) -> bool {
     
     _src := src; // so we can override in single to array case
     
-    dst_ti := cast(*Type_Info_Array) dst.type;
-    src_ti := cast(*Type_Info_Array) _src.type;
+    dst_ti :=  dst.type.(*Type_Info_Array);
+    src_ti := _src.type.(*Type_Info_Array);
     
     // so we an override for 'array-of-one' case
     // NOTE: it is important that we don't access the type info of the element type through _src or src_ti directly now, as this will be invalid in the 'single to array' case
@@ -509,14 +509,14 @@ remap_array :: (dst: Any, src: Any) -> bool {
     }
     
     
-    src_data       : *void = ---;
-    src_elem_count : int   = ---;
+    src_data:       *void = ---;
+    src_elem_count: int   = ---;
     
     if src_ti.array_type == .FIXED {
         src_data       = _src.value_pointer;
         src_elem_count = src_ti.array_count;
     } else {
-        raw_array := cast(*Resizable_Array) _src.value_pointer;
+        raw_array := _src.value_pointer.(*Resizable_Array);
         src_data       = raw_array.data;
         src_elem_count = raw_array.count;
     }             
@@ -533,7 +533,7 @@ remap_array :: (dst: Any, src: Any) -> bool {
         dst_elem_count = dst_ti.array_count;
         
       case .VIEW;
-        raw_array := cast(*Resizable_Array) dst.value_pointer;
+        raw_array := dst.value_pointer.(*Resizable_Array);
         dst_data       = raw_array.data;
         dst_elem_count = raw_array.count;
         if dst_data == null || dst_elem_count < 0 {
@@ -547,7 +547,7 @@ remap_array :: (dst: Any, src: Any) -> bool {
         
       case .RESIZABLE;
         // TODO: verify that cap is set properly ?
-        raw_array := cast(*Resizable_Array) dst.value_pointer;
+        raw_array := dst.value_pointer.(*Resizable_Array);
         array_reserve_nonpoly(xx raw_array, src_elem_count, dst_ti.element_type.runtime_size);
         raw_array.count = src_elem_count;
         dst_data        = raw_array.data;
@@ -590,8 +590,8 @@ remap_enum :: (dst: Any, src: Any) -> bool {
     assert(src.type.type == .ENUM);
     assert(dst.type.type == .ENUM);
     
-    src_ti := cast(*Type_Info_Enum) src.type;
-    dst_ti := cast(*Type_Info_Enum) dst.type;
+    src_ti := src.type.(*Type_Info_Enum);
+    dst_ti := dst.type.(*Type_Info_Enum);
     
     // TODO: should we skip this if both src and dst are #specified?
     conversion := Conversion_Types.ENUM_BY_NAME;
@@ -671,7 +671,7 @@ remap_int :: inline (dst: Any, src: Any) -> bool {
     if src.type.type == {
       case .ENUM; 
         conversion := Conversion_Types.ENUM_TO_INT;
-        if is_narrowing_int(xx dst.type, (cast(*Type_Info_Enum)src.type).internal_type)  conversion |= .INT_NARROWING;
+        if is_narrowing_int(xx dst.type, src.type.(*Type_Info_Enum).internal_type)  conversion |= .INT_NARROWING;
         if !is_allowed(conversion) {
             log_disallowed_conversion(conversion, "remap_int");
             return false;
@@ -816,20 +816,20 @@ bool_to_any :: (dst: Any, src: Any) -> bool {
     assert(src.type.type == .BOOL);
     if dst.type.type == {
       case .BOOL;
-        (cast(*bool)dst.value_pointer).* = (cast(*bool)src.value_pointer).*;
+        dst.value_pointer.(*bool).* = src.value_pointer.(*bool).*;
         return true;
         
       case .ENUM; #through;
       case .INTEGER;
         memset(src.value_pointer, 0, src.type.runtime_size);
-        (cast(*bool)src.value_pointer).* = (cast(*bool)dst.value_pointer).*; // NOTE: little endian assumed?
+        src.value_pointer.(*bool).* = dst.value_pointer.(*bool).*; // NOTE: little endian assumed?
         return true;
         
       case .FLOAT;
-        f64_value: float64 = ifx (cast(*bool)src.value_pointer).* then 1.0 else 0.0;
+        f64_value: float64 = ifx src.value_pointer.(*bool).* then 1.0 else 0.0;
         if dst.type.runtime_size == {
-          case 4; (cast(*float32)src.value_pointer).* = cast(float32) f64_value;
-          case 8; (cast(*float64)src.value_pointer).* = cast(float64) f64_value;
+          case 4; src.value_pointer.(*float32).* = f64_value.(float32);
+          case 8; src.value_pointer.(*float64).* = f64_value;
         }
     }
     return false;
@@ -839,15 +839,15 @@ any_to_bool :: (dst: Any, src: Any) -> bool {
     assert(dst.type.type == .BOOL);
     if src.type.type == {
       case .BOOL; 
-        (cast(*bool)dst.value_pointer).* = (cast(*bool)src.value_pointer).*;
+        dst.value_pointer.(*bool).* = src.value_pointer.(*bool).*;
         return true;
         
       case .ENUM; #through;
       case .INTEGER;
-        ptr := cast(*u8) *src.value_pointer;
+        ptr := (*src.value_pointer).(*u8);
         for 0..src.type.runtime_size-1 {
             if ptr.* != 0 {
-                (cast(*bool)dst.value_pointer).* = true;
+                dst.value_pointer.(*bool).* = true;
                 break;
             }
             ptr += 1;
@@ -857,10 +857,10 @@ any_to_bool :: (dst: Any, src: Any) -> bool {
       case .FLOAT;
         f64_value: float64;
         if src.type.runtime_size == {
-          case 4; f64_value = cast(float64) (cast(*float32)src.value_pointer).*;
-          case 8; f64_value = cast(float64) (cast(*float64)src.value_pointer).*;
+          case 4; f64_value = src.value_pointer.(*float32).*.(float64);
+          case 8; f64_value = src.value_pointer.(*float64).*;
         }
-        if f64_value then (cast(*bool)dst.value_pointer).* = true;
+        if f64_value then dst.value_pointer.(*bool).* = true;
         return true;
     }
     return false;
@@ -882,8 +882,8 @@ int_to_int :: (dst: Any, src: Any) {
     assert(src.type.type == .INTEGER);
     assert(dst.type.type == .INTEGER);
     
-    src_ti := cast(*Type_Info_Integer) src.type;
-    dst_ti := cast(*Type_Info_Integer) dst.type;
+    src_ti := src.type.(*Type_Info_Integer);
+    dst_ti := dst.type.(*Type_Info_Integer);
     
     // @IMPROVEMENT?: 
     // I had considered just doing a memcpy for either 64 bit type, 
@@ -893,7 +893,7 @@ int_to_int :: (dst: Any, src: Any) {
     
     // if both are u64, then using s64 as an intermediate (as we do below) is problematic
     if src_ti == type_info(u64) && dst_ti == type_info(u64) {
-        (cast(*u64)dst.value_pointer).* = (cast(*u64)src.value_pointer).*;
+        dst.value_pointer.(*u64).* = src.value_pointer.(*u64).*;
         return;
     }
     
@@ -902,31 +902,31 @@ int_to_int :: (dst: Any, src: Any) {
     s64_value: s64;
     if src.type.runtime_size == {
       case 1;
-        if src_ti.signed then s64_value = cast(s64) (cast(*s8 )src.value_pointer).*;
-                         else s64_value = cast(s64) (cast(*u8 )src.value_pointer).*;
+        if src_ti.signed then s64_value = src.value_pointer.(*s8 ).*.(s64);
+                         else s64_value = src.value_pointer.(*u8 ).*.(s64);
       case 2;
-        if src_ti.signed then s64_value = cast(s64) (cast(*s16)src.value_pointer).*;
-                         else s64_value = cast(s64) (cast(*u16)src.value_pointer).*;
+        if src_ti.signed then s64_value = src.value_pointer.(*s16).*.(s64);
+                         else s64_value = src.value_pointer.(*u16).*.(s64);
       case 4;
-        if src_ti.signed then s64_value = cast(s64) (cast(*s32)src.value_pointer).*;
-                         else s64_value = cast(s64) (cast(*u32)src.value_pointer).*;
+        if src_ti.signed then s64_value = src.value_pointer.(*s32).*.(s64);
+                         else s64_value = src.value_pointer.(*u32).*.(s64);
       case 8;
-        if src_ti.signed then s64_value = cast(s64) (cast(*s64)src.value_pointer).*;
-                         else s64_value = cast(s64) (cast(*u64)src.value_pointer).*;
+        if src_ti.signed then s64_value = src.value_pointer.(*s64).*.(s64);
+                         else s64_value = src.value_pointer.(*u64).*.(s64);
     }
     if dst.type.runtime_size == {
       case 1; 
-        if dst_ti.signed then (cast(*s8 )dst.value_pointer).* = cast(s8 ) s64_value;
-                         else (cast(*u8 )dst.value_pointer).* = cast(u8 ) s64_value;
+        if dst_ti.signed then dst.value_pointer.(*s8 ).* = s64_value.(s8 );
+                         else dst.value_pointer.(*u8 ).* = s64_value.(u8 );
       case 2; 
-        if dst_ti.signed then (cast(*s16)dst.value_pointer).* = cast(s16) s64_value;
-                         else (cast(*u16)dst.value_pointer).* = cast(u16) s64_value;
+        if dst_ti.signed then dst.value_pointer.(*s16).* = s64_value.(s16);
+                         else dst.value_pointer.(*u16).* = s64_value.(u16);
       case 4; 
-        if dst_ti.signed then (cast(*s32)dst.value_pointer).* = cast(s32) s64_value;
-                         else (cast(*u32)dst.value_pointer).* = cast(u32) s64_value;
+        if dst_ti.signed then dst.value_pointer.(*s32).* = s64_value.(s32);
+                         else dst.value_pointer.(*u32).* = s64_value.(u32);
       case 8; 
-        if dst_ti.signed then (cast(*s64)dst.value_pointer).* = cast(s64) s64_value;
-                         else (cast(*u64)dst.value_pointer).* = cast(u64) s64_value;
+        if dst_ti.signed then dst.value_pointer.(*s64).* = s64_value.(s64);
+                         else dst.value_pointer.(*u64).* = s64_value.(u64);
     }
 }
 
@@ -936,20 +936,20 @@ float_to_int :: (dst: Any, src: Any) {
     
     s64_value: s64;
     if src.type.runtime_size == {
-        case 4; s64_value = cast(s64) (cast(*float32)src.value_pointer).*;
-        case 8; s64_value = cast(s64) (cast(*float64)src.value_pointer).*;
+        case 4; s64_value = src.value_pointer.(*float32).*.(s64);
+        case 8; s64_value = src.value_pointer.(*float64).*.(s64);
     }
     if dst.type.runtime_size == {
-        case 1; (cast(*s8 )dst.value_pointer).* = cast(s8 ) s64_value;
-        case 2; (cast(*s16)dst.value_pointer).* = cast(s16) s64_value;
-        case 4; (cast(*s32)dst.value_pointer).* = cast(s32) s64_value;
-        case 8; (cast(*s64)dst.value_pointer).* = cast(s64) s64_value;
+        case 1; dst.value_pointer.(*s8 ).* = s64_value.(s8 );
+        case 2; dst.value_pointer.(*s16).* = s64_value.(s16);
+        case 4; dst.value_pointer.(*s32).* = s64_value.(s32);
+        case 8; dst.value_pointer.(*s64).* = s64_value.(s64);
     }
 }
 
 enum_as_int :: inline (src: Any) -> Any {
     assert(src.type.type == .ENUM);
-    return Any.{ (cast(*Type_Info_Enum)src.type).internal_type, src.value_pointer };
+    return Any.{ src.type.(*Type_Info_Enum).internal_type, src.value_pointer };
 }
 
 // for convenience
@@ -973,13 +973,13 @@ float_to_float :: (dst: Any, src: Any) {
     if src.type.runtime_size == {
       case 4;
         if dst.type.runtime_size == {
-          case 4; (cast(*float32)dst.value_pointer).* =               (cast(*float32)src.value_pointer).*;
-          case 8; (cast(*float64)dst.value_pointer).* = cast(float64) (cast(*float32)src.value_pointer).*;
+          case 4; dst.value_pointer.(*float32).* = src.value_pointer.(*float32).*;
+          case 8; dst.value_pointer.(*float64).* = src.value_pointer.(*float32).*.(float64);
         }
       case 8;
         if dst.type.runtime_size == {
-          case 4; (cast(*float32)dst.value_pointer).* = cast(float32) (cast(*float64)src.value_pointer).*;
-          case 8; (cast(*float64)dst.value_pointer).* =               (cast(*float64)src.value_pointer).*;
+          case 4; dst.value_pointer.(*float32).* = src.value_pointer.(*float64).*.(float32);
+          case 8; dst.value_pointer.(*float64).* = src.value_pointer.(*float64).*;
         }
     }
 }
@@ -990,15 +990,15 @@ int_to_float :: (dst: Any, src: Any) {
     
     f64_value: float64;
     if src.type.runtime_size == {
-        case 1; f64_value = cast(float64) (cast(*s8  )src.value_pointer).*;
-        case 2; f64_value = cast(float64) (cast(*s16 )src.value_pointer).*;
-        case 4; f64_value = cast(float64) (cast(*s32 )src.value_pointer).*;
-        case 8; f64_value = cast(float64) (cast(*s64 )src.value_pointer).*;
+        case 1; f64_value = src.value_pointer.(*s8 ).*.(float64);
+        case 2; f64_value = src.value_pointer.(*s16).*.(float64);
+        case 4; f64_value = src.value_pointer.(*s32).*.(float64);
+        case 8; f64_value = src.value_pointer.(*s64).*.(float64);
     }
     
     if dst.type.runtime_size == {
-        case 4; (cast(*float32)dst.value_pointer).* = cast(float32) f64_value;
-        case 8; (cast(*float64)dst.value_pointer).* = cast(float64) f64_value;
+        case 4; dst.value_pointer.(*float32).* = f64_value.(float32);
+        case 8; dst.value_pointer.(*float64).* = f64_value.(float64);
     }
 }
 
@@ -1021,21 +1021,21 @@ are_types_equivalent :: (ti1: *Type_Info, ti2: *Type_Info) -> bool {
         return are_structs_equivalent(xx ti1, xx ti2);
         
       case .ARRAY;
-        ti1_array := cast(*Type_Info_Array) ti1;
-        ti2_array := cast(*Type_Info_Array) ti2;
+        ti1_array := ti1.(*Type_Info_Array);
+        ti2_array := ti2.(*Type_Info_Array);
         return ti1_array.array_type == ti2_array.array_type && are_types_equivalent(ti1_array.element_type, ti2_array.element_type);
         
       case .ENUM;
         // on what criteria are two enums equivalent?
         // based only on internal type?
         // would we want to do a more structural check here?
-        ti1_enum := cast(*Type_Info_Enum) ti1;
-        ti2_enum := cast(*Type_Info_Enum) ti2;
+        ti1_enum := ti1.(*Type_Info_Enum);
+        ti2_enum := ti2.(*Type_Info_Enum);
         return  ti1_enum.internal_type.signed == ti2_enum.internal_type.signed; 
         
       case .INTEGER;
-        ti1_integer := cast(*Type_Info_Integer) ti1;
-        ti2_integer := cast(*Type_Info_Integer) ti2;
+        ti1_integer := ti1.(*Type_Info_Integer);
+        ti2_integer := ti2.(*Type_Info_Integer);
         return ti1_integer.signed == ti2_integer.signed; 
         
       case .FLOAT;
@@ -1078,7 +1078,7 @@ are_structs_equivalent :: (ti1: *Type_Info_Struct, ti2: *Type_Info_Struct) -> bo
 resolve_union_by_tag : Get_Union_Type_Proc : (
     dst_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void
 ) -> *Type_Info_Struct_Member {
-    user_data := cast(*Resolve_Union_By_Tag_Data) data;
+    user_data := data.(*Resolve_Union_By_Tag_Data);
     
     log("dst_type: %", type_info_to_type(user_data.dst_type));
     
@@ -1086,7 +1086,7 @@ resolve_union_by_tag : Get_Union_Type_Proc : (
     if !src_parent.value_pointer  return null;
     if !data  return null;
     
-    src_ti := cast(*Type_Info_Struct) src.type;
+    src_ti := src.type.(*Type_Info_Struct);
     assert(src_ti.type == .STRUCT);
     assert(src_ti.textual_flags & .UNION == .UNION);
     
@@ -1123,7 +1123,7 @@ Resolve_Union_By_Tag_Data :: struct {
 get_member_any :: (parent: Any, member_name: string) -> Any {
     assert(parent.type.type == .STRUCT);
     
-    parent_ti := cast(*Type_Info_Struct) parent.type;
+    parent_ti := parent.type.(*Type_Info_Struct);
     
     member: *Type_Info_Struct_Member;
     for *parent_ti.members {
@@ -1151,7 +1151,7 @@ get_member_any :: (parent_ptr: *void, member_ti: *Type_Info_Struct_Member) -> An
 
 recast_type_info :: (any: Any) -> Any {
     if any.type == type_info(*Type_Info) {
-        ti := (cast(**Type_Info) any.value_pointer).*;
+        ti := any.value_pointer.(**Type_Info).*;
         if ti.type == {
             case .INTEGER              ; return Any.{ type_info(*Type_Info_Integer),   any.value_pointer };
             case .FLOAT                ; return Any.{ type_info(*Type_Info_Float),     any.value_pointer };
@@ -1177,8 +1177,8 @@ recast_type_info :: (any: Any) -> Any {
 deref_any_pointer :: (any: Any) -> Any, bool {
     if any.type.type == .POINTER {
         return Any.{
-            (cast(*Type_Info_Pointer)any.type).pointer_to,
-            (cast(**void)any.value_pointer).*
+            any.type.(*Type_Info_Pointer).pointer_to,
+            any.value_pointer.(**void).*
         }, true;
     }
     return any, false;
@@ -1193,7 +1193,7 @@ defer_restore :: (value: $T) #expand {
 unwrap_variant_type :: (any: Any) -> Any {
     if any.type.type == .VARIANT {
         return Any.{
-            (cast(*Type_Info_Variant)any.type).variant_of,
+            any.type.(*Type_Info_Variant).variant_of,
             any.value_pointer
         }, true;
     }
@@ -1202,5 +1202,5 @@ unwrap_variant_type :: (any: Any) -> Any {
 
 // TODO: maybe move this to some utils file if we do keep it around
 type_info_to_type :: inline (ti: *Type_Info) -> Type {
-    return (cast(*Type)*ti).*;
+    return (*ti).(*Type).*;
 }
