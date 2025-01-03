@@ -94,6 +94,7 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
 //           we can memcpy fixed arrays if inner type is memcpy-able
 
 
+
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
 pack_data :: (data: Any) -> ([] u8, bool) {
     recurse :: (data: Any, buffer: *[] u8, write_offset: s64, pointer_map: *Table(*void, s64)) -> bool {
@@ -102,8 +103,15 @@ pack_data :: (data: Any) -> ([] u8, bool) {
         
         if data.type.type == {
           case .STRUCT;
+            // TODO: We really need to think about what to do for unions. 
+            //       These need to be resolved here as they are in remap data.
+            //       Otherwise we could end up trying to copy through pointers that we shouldn't be.
+            //       Not to mention that we would otherwise just waste time on copying data repeatedly.
             ti_struct := data.type.(*Type_Info_Struct);
             for ti_struct.members {
+                array_add(*debug_trace, it.name);
+                defer pop(*debug_trace);
+                
                 member_any := Any.{ it.type, data.value_pointer + it.offset_in_bytes };
                 if !recurse(member_any, buffer, write_offset + it.offset_in_bytes, pointer_map) {
                     // print("Error while packing data for array.\n");
@@ -136,6 +144,9 @@ pack_data :: (data: Any) -> ([] u8, bool) {
             
             elem_any := Any.{ ti_array.element_type, src_data };
             for 0..elem_count-1 {
+                array_add(*debug_trace, tprint("[%]", it));
+                defer pop(*debug_trace);
+                
                 if !recurse(elem_any, buffer, data_offset, pointer_map) {
                     print("Error while packing data for array.\n");
                     return false;
@@ -215,8 +226,6 @@ pack_data :: (data: Any) -> ([] u8, bool) {
     return buffer, true;
 }
 
-debug_idents : [..] string;
-
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
 // we can't figure out where all pointers are within blob without just doing the whole recursive thing
 // but we may have multiple pointers that point to the same data
@@ -228,12 +237,12 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
           case .STRUCT;
             ti_struct := type.(*Type_Info_Struct);
             for ti_struct.members {
-                array_add(*debug_idents, it.name);
+                array_add(*debug_trace, it.name);
                 if !recurse(it.type, buffer, offset + it.offset_in_bytes, unpacked_offsets) {
                     print("Error while unpacking data for struct member.\n");
                     return false;
                 }
-                pop(*debug_idents);
+                pop(*debug_trace);
             }
             
           case .ARRAY;          
@@ -256,13 +265,13 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
             }
             
             for 0..elem_count-1 {
-                array_add(*debug_idents, tprint("[%]", it));
+                array_add(*debug_trace, tprint("[%]", it));
                 if !recurse(ti_array.element_type, buffer, data_offset, unpacked_offsets) {
                     print("Error while unpacking data for array.\n");
                     return false;
                 }
                 data_offset += ti_array.element_type.runtime_size;
-                pop(*debug_idents);
+                pop(*debug_trace);
             }
             
           case .STRING;
@@ -279,7 +288,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
                 // TODO: I dont think any of the pointer correcting logic will work until we change this logic
                 // We need to actually check ptr_ptr against a list of already adjusted pointers instead of this hacky method
                 derefed_offset := ptr_ptr.(*u64).*;
-                // print("adjusting ptr @ (%) % %\n", ptr_ptr, derefed_offset, debug_idents);
+                // print("adjusting ptr @ (%) % %\n", ptr_ptr, derefed_offset, debug_trace);
                 
                 if derefed_offset >= buffer.data.(u64) {
                     assert(false, "pointer @ % was already adjusted!\n", ptr_ptr);
@@ -315,7 +324,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
     unpacked_offsets: [..] s64;
     defer array_free(unpacked_offsets);
     
-    array_reset_keeping_memory(*debug_idents);
+    array_reset_keeping_memory(*debug_trace);
     
     if !recurse(type, buffer, 0, *unpacked_offsets) {
         return Any.{}, false;
@@ -424,6 +433,8 @@ is_type_info_subtype :: (ti: *Type_Info) -> bool {
 }
 
 
+debug_trace: [..] string;
+
 
 #scope_module
 
@@ -465,3 +476,5 @@ array_reserve_nonpoly :: (array: *Resizable_Array, desired_items: s64, elem_size
     
     array.allocated = desired_items;
 }
+
+
