@@ -225,13 +225,13 @@ pack_data :: (data: Any) -> ([] u8, bool) {
             
             // If pointer is to a very common type info, we specially encode it as such
             // This prevents us from having to actually write that type info out to file
-            enumerated_ti := get_enumerated_type_info(_data.value_pointer.(**Type_Info).*);
-            if enumerated_ti {
-                encoded_ptr := encode_local_data_pointer(enumerated_ti.(u32), 0);
-                memcpy(*buffer.data[write_offset], *encoded_ptr, size_of(*void));
-                log("encoded enumerated type info pointer for %", _data.value_pointer.(*Type).*);
-                return true;
-            }
+            // enumerated_ti := get_enumerated_type_info(_data.value_pointer.(**Type_Info).*);
+            // if enumerated_ti {
+            //     encoded_ptr := encode_local_data_pointer(enumerated_ti.(u32), 0);
+            //     memcpy(*buffer.data[write_offset], *encoded_ptr, size_of(*void));
+            //     log("encoded enumerated type info pointer for %", _data.value_pointer.(*Type).*);
+            //     return true;
+            // }
             
             
             // DEREF AND RECURSE, IF NOT ALREADY WRITTEN
@@ -359,13 +359,13 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
                 packed_ptr := ptr_ptr.(**void).*;
                 
                 if is_local_data_pointer(packed_ptr) {
-                    pointer_to := type.(*Type_Info_Pointer).pointer_to;
-                    ti_ptr, found := decode_enumerated_type_info_pointer(packed_ptr, pointer_to);
-                    if found {
-                        ptr_ptr.* = ti_ptr;
-                        log("decoded enumerated type info pointer for %", (*ti_ptr).(*Type).*);
-                        return true;
-                    }
+                    // pointer_to := type.(*Type_Info_Pointer).pointer_to;
+                    // ti_ptr, found := decode_enumerated_type_info_pointer(packed_ptr, pointer_to);
+                    // if found {
+                    //     ptr_ptr.* = ti_ptr;
+                    //     log("decoded enumerated type info pointer for %", (*ti_ptr).(*Type).*);
+                    //     return true;
+                    // }
                     
                     // TODO: user callbacks for resolving local data pointers
                 }
