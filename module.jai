@@ -445,7 +445,7 @@ Packed_Pointer_Masks :: enum u64 #specified {
     // things in the reserved bytes here are subject to change
     // so probably don't rely on these for user-implemented stuff
     RESERVED     :: 0xFFFF_0000_0000_0000; // top 2 bytes reserved for future implementation
-    LOCAL_DATA   :: 1 << 62;               // signifies that the pointer should be resolved in reference to some local data
+    LOCAL_DATA   :: 1 << 63;               // signifies that the pointer should be resolved in reference to some local data
     
     USER         :: 0x0000_FFFF_0000_0000; // bytes 5 & 6 reserved for user-defined flags/data
 }
