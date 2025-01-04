@@ -1074,15 +1074,20 @@ are_structs_equivalent :: (ti1: *Type_Info_Struct, ti2: *Type_Info_Struct) -> bo
         to map from tag value to union member name
     
     we can also write a proc to generate the lookup Resolve_Union_By_Tag_Data for Tagged_Union
+    
+    I should document this because I forgot it and then had to figure out why I did it this way again...
+    So the reason there's a union_ti passed in here is because we can't actually match on src type, since it may be some dynamically loaded type info
+    So we want to match the dst union type to what is in the user data and then just verify that the src type is also a union
+    In cases where we know we can use src type, we will just have to pass it as union_ti as well
 */
-resolve_union_by_tag : Get_Union_Type_Proc : (
-    dst_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void
+resolve_union_by_external_tag : Get_Union_Type_Proc : (
+    union_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void
 ) -> *Type_Info_Struct_Member {
     user_data := data.(*Resolve_Union_By_Tag_Data);
     
-    log("dst_type: %", type_info_to_type(user_data.dst_type));
+    // log("union_type: %", type_info_to_type(user_data.union_type));
     
-    if dst_ti != user_data.dst_type  return null;
+    if union_ti != user_data.union_type  return null;
     if !src_parent.value_pointer  return null;
     if !data  return null;
     
@@ -1113,11 +1118,49 @@ resolve_union_by_tag : Get_Union_Type_Proc : (
     return null;
 }
 
+resolve_union_by_internal_tag : Get_Union_Type_Proc : (
+    union_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void
+) -> *Type_Info_Struct_Member {
+    user_data := data.(*Resolve_Union_By_Tag_Data);
+    
+    // log("union_type: %", type_info_to_type(user_data.union_type));
+    
+    if union_ti != user_data.union_type  return null;
+    if !data  return null;
+    
+    src_ti := src.type.(*Type_Info_Struct);
+    assert(src_ti.type == .STRUCT);
+    assert(src_ti.textual_flags & .UNION == .UNION);
+    
+    dst_tag: s64;
+    src_tag := get_member_any(src.value_pointer, get_field(xx src.type, user_data.tag_member_name));
+    if !remap_data(Any.{ xx user_data.tag_type, *dst_tag }, src_tag)  return null;
+    
+    src_member_name: string;
+    for user_data.lookup {
+        if it.tag_value == dst_tag {
+            src_member_name = it.member_name;
+            break;
+        }
+    }
+    if !src_member_name  return null;
+    
+    for *src_member: src_ti.members {
+        if src_member.flags & .CONSTANT  continue;
+        if src_member.name == src_member_name {
+            return src_member;
+        }
+    }
+    
+    return null;
+}
+
+
 Resolve_Union_By_Tag_Data :: struct {
-    tag_member_name : string;
-    tag_type        : *Type_Info_Enum;
-    dst_type        : *Type_Info;
-    lookup          : [] struct { tag_value: s64; member_name: string; };
+    tag_member_name:    string;
+    tag_type:           *Type_Info_Enum;
+    union_type:         *Type_Info;
+    lookup:             [] struct { tag_value: s64; member_name: string; };
 }
 
 get_member_any :: (parent: Any, member_name: string) -> Any {
@@ -1153,22 +1196,15 @@ recast_type_info :: (any: Any) -> Any {
     if any.type == type_info(*Type_Info) {
         ti := any.value_pointer.(**Type_Info).*;
         if ti.type == {
-            case .INTEGER              ; return Any.{ type_info(*Type_Info_Integer),   any.value_pointer };
-            case .FLOAT                ; return Any.{ type_info(*Type_Info_Float),     any.value_pointer };
-            case .STRING               ; return Any.{ type_info(*Type_Info_String),    any.value_pointer };
-            case .POINTER              ; return Any.{ type_info(*Type_Info_Pointer),   any.value_pointer };
-            case .PROCEDURE            ; return Any.{ type_info(*Type_Info_Procedure), any.value_pointer };
-            case .STRUCT               ; return Any.{ type_info(*Type_Info_Struct),    any.value_pointer };
-            case .ARRAY                ; return Any.{ type_info(*Type_Info_Array),     any.value_pointer };
-            case .ENUM                 ; return Any.{ type_info(*Type_Info_Enum),      any.value_pointer };
-            case .VARIANT              ; return Any.{ type_info(*Type_Info_Variant),   any.value_pointer };
-            // case .BOOL                 ; return Any.{ type_info(*Type_Info_Bool), any.value_pointer };
-            // case .VOID                 ; return Any.{ type_info(*Type_Info_Void), any.value_pointer };
-            // case .OVERLOAD_SET         ; return Any.{ type_info(*Type_Info_Overlaod_Set), any.value_pointer };
-            // case .ANY                  ; return Any.{ type_info(*Type_Info_Any), any.value_pointer };
-            // case .POLYMORPHIC_VARIABLE ; return Any.{ type_info(*Type_Info_Polymorphic_Variable), any.value_pointer };
-            // case .TYPE                 ; return Any.{ type_info(*Type_Info_Type), any.value_pointer };
-            // case .CODE                 ; return Any.{ type_info(*Type_Info_Code), any.value_pointer };
+            case .INTEGER;      return Any.{ type_info(*Type_Info_Integer),   any.value_pointer };
+            case .FLOAT;        return Any.{ type_info(*Type_Info_Float),     any.value_pointer };
+            case .STRING;       return Any.{ type_info(*Type_Info_String),    any.value_pointer };
+            case .POINTER;      return Any.{ type_info(*Type_Info_Pointer),   any.value_pointer };
+            case .PROCEDURE;    return Any.{ type_info(*Type_Info_Procedure), any.value_pointer };
+            case .STRUCT;       return Any.{ type_info(*Type_Info_Struct),    any.value_pointer };
+            case .ARRAY;        return Any.{ type_info(*Type_Info_Array),     any.value_pointer };
+            case .ENUM;         return Any.{ type_info(*Type_Info_Enum),      any.value_pointer };
+            case .VARIANT;      return Any.{ type_info(*Type_Info_Variant),   any.value_pointer };
         }
     }
     return any;

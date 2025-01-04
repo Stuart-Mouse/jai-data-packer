@@ -94,35 +94,65 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
 //           we can memcpy fixed arrays if inner type is memcpy-able
 
 
-
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
 pack_data :: (data: Any) -> ([] u8, bool) {
-    recurse :: (data: Any, buffer: *[] u8, write_offset: s64, pointer_map: *Table(*void, s64)) -> bool {
+    recurse :: (
+        data:           Any, 
+        buffer:         *[] u8, 
+        write_offset:   s64, 
+        pointer_map:    *Table(*void, s64), 
+        parent:         Any,
+        data_tism:      *Type_Info_Struct_Member
+    ) -> bool {
         // print("Writing % at offset %\n", (cast(*Type)*data.type).*, write_offset);
         // print("Writing % at offset %\n", data.type.*, write_offset);
         
+        // TODO: should have callback location here to insert special serialization logic for certain types
+        //       for example serializing bucket array as a flat array 
+        //       obviously should be implemented with corresponding logic for deserializing
+        //       But, that could also be very problematic if we don't record in the type info that such fields are specially serialized.
+        
         if data.type.type == {
           case .STRUCT;
-            // TODO: We really need to think about what to do for unions. 
-            //       These need to be resolved here as they are in remap data.
-            //       Otherwise we could end up trying to copy through pointers that we shouldn't be.
-            //       Not to mention that we would otherwise just waste time on copying data repeatedly.
             ti_struct := data.type.(*Type_Info_Struct);
-            for ti_struct.members {
-                array_add(*debug_trace, it.name);
+            
+            if ti_struct.textual_flags & .UNION {
+                member: *Type_Info_Struct_Member;
+                for context.data_packer.conversion_settings.get_union_type_procs {
+                    member = it.proc(data.type, data, parent, data_tism, it.data);
+                    if member  break;
+                }
+                // If 'member' was not set, this is not necessarily treated as an error. Perhaps the union was just empty.
+                if member {
+                    assert(member.flags & .CONSTANT == 0);
+                    log("Resolved union member for union of type % to %", (*data.type).(*Type).*, (*member.type).(*Type).*);
+                    member_any := Any.{ member.type, data.value_pointer + member.offset_in_bytes };
+                    if !recurse(member_any, buffer, write_offset + member.offset_in_bytes, pointer_map, data, member) {
+                        return false;
+                    }
+                }
+            }
+            
+            last_member_offset := -1;
+            for member: ti_struct.members {
+                if member.flags & .CONSTANT  continue;
+                // ignoring #place members. Wish there were a better way to do this.
+                if member.offset_in_bytes < last_member_offset  break; 
+                last_member_offset = member.offset_in_bytes;
+                
+                array_add(*debug_trace, member.name);
                 defer pop(*debug_trace);
                 
-                member_any := Any.{ it.type, data.value_pointer + it.offset_in_bytes };
-                if !recurse(member_any, buffer, write_offset + it.offset_in_bytes, pointer_map) {
-                    // print("Error while packing data for array.\n");
+                member_any := Any.{ member.type, data.value_pointer + member.offset_in_bytes };
+                if !recurse(member_any, buffer, write_offset + member.offset_in_bytes, pointer_map, data, *member) {
                     return false;
                 }
             }
             
           case .ARRAY;
-            data_offset : s64   = ---; // destination for copied data
-            src_data    : *void = ---; // base pointer for source data
-            elem_count  : int   = ---;
+            data_offset: s64   = ---; // destination for copied data
+            src_data:    *void = ---; // base pointer for source data
+            elem_count:  int   = ---;
             
             ti_array := data.type.(*Type_Info_Array);
             if ti_array.array_type != .FIXED {
@@ -147,7 +177,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
                 array_add(*debug_trace, tprint("[%]", it));
                 defer pop(*debug_trace);
                 
-                if !recurse(elem_any, buffer, data_offset, pointer_map) {
+                if !recurse(elem_any, buffer, data_offset, pointer_map, data, null) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
@@ -160,7 +190,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
           case .INTEGER; #through;
           case .FLOAT;   
             memcpy(*(buffer.data[write_offset]), data.value_pointer, data.type.runtime_size);
-          
+            
           case .STRING;
             str     := data.value_pointer.(*string).*;
             str_dst := buffer.count;
@@ -169,7 +199,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
             array_resize(buffer, buffer.count + str.count);
             memcpy(*buffer.data[str_dst], str.data, str.count);
             
-            str.data = xx str_dst;
+            str.data = str_dst.(*u8);
             memcpy(*buffer.data[write_offset], *str, size_of(string));
             
           case .POINTER;
@@ -180,30 +210,48 @@ pack_data :: (data: Any) -> ([] u8, bool) {
                 return true;
             }
             
+            // RECAST POINTER IF NEED BE
+            // TODO: generalize this to run through multiple recast procs, breaking when one succeeds
             // Special case, we remap *Type_Info to the specific subtype that it actually is
             _data := recast_type_info(data);
             if data.type != _data.type {
                 // print("recast *Type_Info to %\n", (cast(*Type)*_data.type).*);
             }
             
-            ti_derefed := _data.type.(*Type_Info_Pointer).pointer_to;
-        
+            
+            // ENCODE LOCAL DATA POINTERS
+            // TODO: generalize this to run through multiple encoding procs, breaking when one succeeds
+            // NOTE: how these get encoded and decode is highly contextual! Depends on the type of the pointer and such.
+            
+            // If pointer is to a very common type info, we specially encode it as such
+            // This prevents us from having to actually write that type info out to file
+            enumerated_ti := get_enumerated_type_info(_data.value_pointer.(**Type_Info).*);
+            if enumerated_ti {
+                encoded_ptr := encode_local_data_pointer(enumerated_ti.(u32), 0);
+                memcpy(*buffer.data[write_offset], *encoded_ptr, size_of(*void));
+                log("encoded enumerated type info pointer for %", _data.value_pointer.(*Type).*);
+                return true;
+            }
+            
+            
+            // DEREF AND RECURSE, IF NOT ALREADY WRITTEN
             ptr_offset, found := table_find(pointer_map, raw_pointer);
             if !found {
                 ptr_offset = buffer.count;
                 table_add(pointer_map, raw_pointer, ptr_offset);
                 
+                ti_derefed := _data.type.(*Type_Info_Pointer).pointer_to;
                 array_resize(buffer, buffer.count + ti_derefed.runtime_size);
                 
                 derefed_any := Any.{ ti_derefed, raw_pointer };
-                if !recurse(derefed_any, buffer, ptr_offset, pointer_map) {
+                if !recurse(derefed_any, buffer, ptr_offset, pointer_map, parent, data_tism) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
                 
                 // print("ptr offset %\n", ptr_offset);
             } else {
-                // print("Data at pointer address has already been written.\n");
+                // print("Data at % has already been written.\n", raw_pointer);
             }
             
             memcpy(*buffer.data[write_offset], *ptr_offset, size_of(*void));
@@ -218,7 +266,7 @@ pack_data :: (data: Any) -> ([] u8, bool) {
     defer deinit(*pointer_map);
     
     array_resize(*buffer, data.type.runtime_size);
-    if !recurse(data, *buffer, 0, *pointer_map) {
+    if !recurse(data, *buffer, 0, *pointer_map, Any.{}, null) {
         free(buffer.data);
         return .[], false;
     }
@@ -230,24 +278,47 @@ pack_data :: (data: Any) -> ([] u8, bool) {
 // we can't figure out where all pointers are within blob without just doing the whole recursive thing
 // but we may have multiple pointers that point to the same data
 unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
-    recurse :: (type: *Type_Info, buffer: *[] u8, offset: s64, unpacked_offsets: *[..] s64) -> bool {
+    recurse :: (
+        type:               *Type_Info, 
+        buffer:             *[] u8, 
+        offset:             s64, 
+        unpacked_offsets:   *[..] s64
+        // parent:             Any,
+        // data_tism:          *Type_Info_Struct_Member,
+    ) -> bool {
         // print("Unpacking data of type % at offset %\n", type.*, offset);
+        // data := Any.{ type, *buffer[offset] };
         
         if type.type == {
           case .STRUCT;
             ti_struct := type.(*Type_Info_Struct);
-            for ti_struct.members {
-                array_add(*debug_trace, it.name);
-                if !recurse(it.type, buffer, offset + it.offset_in_bytes, unpacked_offsets) {
+            
+            // temporary solution, just going to assume unions are trivially copyable and that we don't need to chase down any pointers inside
+            // the problem is that we really can't use the type info here in our union resolution procs as we would in remap or pack procs
+            // because we can't recognize the type tag value itself. perhaps we could use the type's name to try and do the resolution?
+            // Or, theoretically, maybe we should do the remapping at the same time that we are unpacking the data?
+            if ti_struct.textual_flags & .UNION {
+                return true;
+            }
+            
+            last_member_offset := -1;
+            for member: ti_struct.members {
+                if member.flags & .CONSTANT  continue;
+                // ignoring #place members. Wish there were a better way to do this.
+                if member.offset_in_bytes < last_member_offset  break; 
+                last_member_offset = member.offset_in_bytes;
+                
+                array_add(*debug_trace, member.name);
+                if !recurse(member.type, buffer, offset + member.offset_in_bytes, unpacked_offsets) {
                     print("Error while unpacking data for struct member.\n");
                     return false;
                 }
                 pop(*debug_trace);
             }
             
-          case .ARRAY;          
-            data_offset : s64 = ---;
-            elem_count  : int = ---;
+          case .ARRAY;
+            data_offset: s64 = ---;
+            elem_count:  int = ---;
             
             ti_array := type.(*Type_Info_Array);
             if ti_array.array_type != .FIXED {
@@ -280,38 +351,46 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
                 // print("string data pointer was already adjusted...\n");
                 return true;
             }
-            str.data = xx (buffer.data + str.data.(s64));
+            str.data = buffer.data + str.data.(s64);
             
           case .POINTER;
             ptr_ptr := (*buffer.data[offset]).(**void);
             if ptr_ptr.* != null {
-                // TODO: I dont think any of the pointer correcting logic will work until we change this logic
-                // We need to actually check ptr_ptr against a list of already adjusted pointers instead of this hacky method
-                derefed_offset := ptr_ptr.(*u64).*;
-                // print("adjusting ptr @ (%) % %\n", ptr_ptr, derefed_offset, debug_trace);
+                packed_ptr := ptr_ptr.(**void).*;
                 
-                if derefed_offset >= buffer.data.(u64) {
-                    assert(false, "pointer @ % was already adjusted!\n", ptr_ptr);
-                    return true;
+                if is_local_data_pointer(packed_ptr) {
+                    pointer_to := type.(*Type_Info_Pointer).pointer_to;
+                    ti_ptr, found := decode_enumerated_type_info_pointer(packed_ptr, pointer_to);
+                    if found {
+                        ptr_ptr.* = ti_ptr;
+                        log("decoded enumerated type info pointer for %", (*ti_ptr).(*Type).*);
+                        return true;
+                    }
+                    
+                    // TODO: user callbacks for resolving local data pointers
                 }
                 
-                ptr_ptr.* = xx (buffer.data + derefed_offset);
+                data_offset := packed_ptr.(s64) & Packed_Pointer_Masks.DATA_OFFSET.(s64);
+                
+                // assert(derefed_offset < buffer.data.(u64), "pointer @ % was already adjusted!\n", ptr_ptr);
+                
+                ptr_ptr.* = buffer.data + data_offset;
                 // print("offset % -> ptr %\n", derefed_offset, ptr_ptr.*);
                 
-                if array_find(unpacked_offsets.*, derefed_offset.(s64)) {
+                // after fixing the pointer itself, check if we need to unpack contents pointed to by pointer
+                if array_find(unpacked_offsets.*, data_offset) {
                     // print("data @ ptr was already unpacked\n");
                     return true;
                 }
-                
-                array_add(unpacked_offsets, derefed_offset.(s64));
+                array_add(unpacked_offsets, data_offset);
                 
                 _data := recast_type_info(Any.{ type, ptr_ptr });
                 if type != _data.type {
                     // print("recast *Type_Info to %\n", (cast(*Type)*_data.type).*);
                 }
                 
-                ti_derefed := _data.type.(*Type_Info_Pointer).pointer_to;
-                if !recurse(ti_derefed, buffer, derefed_offset.(s64), unpacked_offsets) {
+                type_pointed_to := _data.type.(*Type_Info_Pointer).pointer_to;
+                if !recurse(type_pointed_to, buffer, data_offset, unpacked_offsets) {
                     print("Error while unpacking data through pointer.\n");
                     return false;
                 }
@@ -358,20 +437,40 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> Any, bool {
 // we give the callback the packed pointer and what it's a pointer to, and then the callback can figure out if it is able to resolve the pointer
 // this seems better than just using a blind lookup table, since we can consider the context of the type we are pointing to.
 // should be much easier for users to implement extended behaviour this way
-Resolve_Local_Pointer_Proc :: #type (packed_ptr: u64, pointer_to: *Type_Info) -> (*void, bool);
+Resolve_Local_Pointer_Proc :: #type (packed_ptr: *void, pointer_to: *Type_Info) -> (*void, bool);
 
 Packed_Pointer_Masks :: enum u64 #specified {
-    DATA_OFFSET :: 0x0000_0000_FFFF_FFFF; // bottom 32 bits used for data offset in blob
+    DATA_OFFSET  :: 0x0000_0000_FFFF_FFFF; // bottom 32 bits used for data offset in blob
     
-    RESERVED    :: 0xFFFF_0000_0000_0000; // top 2 bytes reserved for future implementation
-    LOCAL_DATA  :: 1 << 63;               // signifies that the pointer should be resolved in reference to some local data
+    // things in the reserved bytes here are subject to change
+    // so probably don't rely on these for user-implemented stuff
+    RESERVED     :: 0xFFFF_0000_0000_0000; // top 2 bytes reserved for future implementation
+    LOCAL_DATA   :: 1 << 62;               // signifies that the pointer should be resolved in reference to some local data
     
-    USER        :: 0x0000_FFFF_0000_0000; // bytes 5 & 6 reserved for user-defined flags
+    USER         :: 0x0000_FFFF_0000_0000; // bytes 5 & 6 reserved for user-defined flags/data
 }
 
+// should only be given a pointer in the packed encoding!
+is_local_data_pointer :: inline (ptr: *void) -> bool {
+    return ptr.(u64) & Packed_Pointer_Masks.LOCAL_DATA.(u64) != 0;
+}
+
+encode_local_data_pointer :: inline (ptr_data: u32, user_data: u16) -> *void {
+    return (Packed_Pointer_Masks.LOCAL_DATA.(u64) | (user_data.(u64) << 32) | ptr_data.(u64)).(*void);
+}
+
+decode_local_data_pointer :: inline (ptr: *void) -> (ptr_data: u32, user_data: u16) {
+    using Packed_Pointer_Masks;
+    assert(is_local_data_pointer(ptr));
+    return (ptr.(u64) & DATA_OFFSET.(u64)).(u32), ((ptr.(u64) & USER.(u64)) >> 32).(u16);
+}
+
+
+
 // enumerates common type infos, used as ids for local pointers
-Common_Type_Infos :: enum u32 #specified {
-    VOID   ::  0;
+Enumerated_Type_Info :: enum u32 #specified {
+    NOT_ENUMERATED ::  0; // used as out-of-band value
+    
     U8     ::  1;
     S8     ::  2;
     U16    ::  3;
@@ -384,32 +483,93 @@ Common_Type_Infos :: enum u32 #specified {
     F64    :: 10;
     BOOL   :: 11;
     STRING :: 12;
+    VOID   :: 13;
+    
+    PTR_U8     ::  1 | (1 << 31);
+    PTR_S8     ::  2 | (1 << 31);
+    PTR_U16    ::  3 | (1 << 31);
+    PTR_S16    ::  4 | (1 << 31);
+    PTR_U32    ::  5 | (1 << 31);
+    PTR_S32    ::  6 | (1 << 31);
+    PTR_U64    ::  7 | (1 << 31);
+    PTR_S64    ::  8 | (1 << 31);
+    PTR_F32    ::  9 | (1 << 31);
+    PTR_F64    :: 10 | (1 << 31);
+    PTR_BOOL   :: 11 | (1 << 31);
+    PTR_STRING :: 12 | (1 << 31);
+    PTR_VOID   :: 13 | (1 << 31);
 }
 
-resolve_common_type_info_pointer : Resolve_Local_Pointer_Proc : 
-    (packed_ptr: u64, pointer_to: *Type_Info) -> (*void, bool)
+get_enumerated_type_info :: (ti: *Type_Info) -> Enumerated_Type_Info {
+    type := (*ti).(*Type).*;
+    if type == {
+        case u8;        return .U8;
+        case s8;        return .S8;
+        case u16;       return .U16;
+        case s16;       return .S16;
+        case u32;       return .U32;
+        case s32;       return .S32;
+        case u64;       return .U64;
+        case s64;       return .S64;
+        case float32;   return .F32;
+        case float64;   return .F64;
+        case bool;      return .BOOL;
+        case string;    return .STRING;
+        case void;      return .VOID;
+        
+        case *u8;        return .PTR_U8;
+        case *s8;        return .PTR_S8;
+        case *u16;       return .PTR_U16;
+        case *s16;       return .PTR_S16;
+        case *u32;       return .PTR_U32;
+        case *s32;       return .PTR_S32;
+        case *u64;       return .PTR_U64;
+        case *s64;       return .PTR_S64;
+        case *float32;   return .PTR_F32;
+        case *float64;   return .PTR_F64;
+        case *bool;      return .PTR_BOOL;
+        case *string;    return .PTR_STRING;
+        case *void;      return .PTR_VOID;
+    }
+    return .NOT_ENUMERATED;
+}
+
+decode_enumerated_type_info_pointer : Resolve_Local_Pointer_Proc : 
+    (packed_ptr: *void, pointer_to: *Type_Info) -> (*void, bool)
 {
     if !is_type_info_subtype(pointer_to)  return null, false;
+    ptr_data, user_data := decode_local_data_pointer(packed_ptr);
     
-    ti_id := (packed_pointer & Packed_Pointer_Masks.DATA_OFFSET.(u64)).(Common_Type_Infos);
-    
-    // if ti_id is not one of our enumerated values, then we can't resolve it
-    if !array_find(type_info(Common_Type_Infos).values, ti_id)  return null, false;
-    
-    if #complete ti_id == {
-        case .VOID;     return void;
-        case .U8;       return u8;
-        case .S8;       return s8;
-        case .U16;      return u16;
-        case .S16;      return s16;
-        case .U32;      return u32;
-        case .S32;      return s32;
-        case .U64;      return u64;
-        case .S64;      return s64;
-        case .F32;      return float32;
-        case .F64;      return float64;
-        case .BOOL;     return bool;
-        case .STRING;   return string;
+    if #complete ptr_data.(Enumerated_Type_Info) == {
+        case .U8;       return type_info(u8),      true;
+        case .S8;       return type_info(s8),      true;
+        case .U16;      return type_info(u16),     true;
+        case .S16;      return type_info(s16),     true;
+        case .U32;      return type_info(u32),     true;
+        case .S32;      return type_info(s32),     true;
+        case .U64;      return type_info(u64),     true;
+        case .S64;      return type_info(s64),     true;
+        case .F32;      return type_info(float32), true;
+        case .F64;      return type_info(float64), true;
+        case .BOOL;     return type_info(bool),    true;
+        case .STRING;   return type_info(string),  true;
+        case .VOID;     return type_info(void),    true;
+        
+        case .PTR_U8;       return type_info(*u8),      true;
+        case .PTR_S8;       return type_info(*s8),      true;
+        case .PTR_U16;      return type_info(*u16),     true;
+        case .PTR_S16;      return type_info(*s16),     true;
+        case .PTR_U32;      return type_info(*u32),     true;
+        case .PTR_S32;      return type_info(*s32),     true;
+        case .PTR_U64;      return type_info(*u64),     true;
+        case .PTR_S64;      return type_info(*s64),     true;
+        case .PTR_F32;      return type_info(*float32), true;
+        case .PTR_F64;      return type_info(*float64), true;
+        case .PTR_BOOL;     return type_info(*bool),    true;
+        case .PTR_STRING;   return type_info(*string),  true;
+        case .PTR_VOID;     return type_info(*void),    true;
+        
+        case .NOT_ENUMERATED; // this also fails
     }
     
     return null, false;
@@ -421,7 +581,6 @@ is_type_info_subtype :: (ti: *Type_Info) -> bool {
       case type_info(Type_Info_Integer);        return true;
       case type_info(Type_Info_Float);          return true;
       case type_info(Type_Info_Enum);           return true;
-      case type_info(Type_Info_Bool);           return true;
       case type_info(Type_Info_String);         return true;
       case type_info(Type_Info_Struct);         return true;
       case type_info(Type_Info_Struct_Member);  return true;
