@@ -63,7 +63,7 @@ Conversion_Settings :: struct {
     allowed_conversions   : Conversion_Types;
     float_to_int_rounding : enum { TRUNCATE; FLOOR; CEIL; NEAREST; };
     pointer_recast_procs  : [..] struct { proc: Pointer_Recast_Proc; data: *void; };
-    get_union_type_procs  : [..] struct { proc: Get_Union_Type_Proc; data: *void; };
+    get_union_type_procs  : [..] struct { proc: Resolve_Union_Proc; data: *void; };
     
     // TODO: probably add some more in-depth rules for struct remapping.
     //       and probably allow overloading these on a per-struct basis
@@ -77,10 +77,16 @@ Conversion_Settings :: struct {
 };
 
 // the Any's passed in and out must be pointers
-// returns true if the Any has been recast, false if not
+// returns true if the type has been recast, false if not
 // this is only for casting down to a more specific type (e.g.: casting a *Type_Info down to a *Type_Info_Enum)
-Pointer_Recast_Proc :: #type (any: Any, data: *void) -> (Any, bool);
-Get_Union_Type_Proc :: #type (dst_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void) -> *Type_Info_Struct_Member;
+Pointer_Recast_Proc :: #type (ptr: Data_With_Context, user_data: *void) -> (Any, bool);
+
+// Union types are resolved by returning the type info struct member for the union member that is valid.
+// The union_ti parameter is used during remapping to pass the type info for the dst union's type info, 
+//     since we usually want to match on this rather than on the src type (which is probably dynamically loaded type info).
+Resolve_Union_Proc :: #type (union_ti: *Type_Info, src: Data_With_Context, user_data: *void) -> *Type_Info_Struct_Member;
+
+
 // TODO: generalized remap callback that will completely override remapping for a given dst type
 //       peraps that was even th emore wise/simple way to go for unions, but whatever
 //       if we did that generally for unions, we would have to always pass src_parent to remap_data
@@ -335,6 +341,8 @@ remap_struct :: (dst: Any, src: Any) -> bool {
     
     The parent Any may not be provided in the user callback, so the user needs to be aware of this and handle this case.
     src_member_ti will be provided if and only if src_parent is provided
+    
+    TODO: should we pass Data with context for src data here?
 */
 remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct_Member) -> bool {
     settings := context.data_packer.conversion_settings;
@@ -348,7 +356,7 @@ remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct
         return false;
     }
     
-    // Maybe TODO
+    // TODO: probably should support this, shouldn't be too hard
     if !type_is_union(src.type) {
         log("Error: Conversion from non-union type to union is not supported.");
         return false;
@@ -356,11 +364,11 @@ remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct
     
     src_member: *Type_Info_Struct_Member;
     for settings.get_union_type_procs {
-        src_member = it.proc(dst.type, src, src_parent, src_tism, it.data);
+        src_member = it.proc(dst.type, .{ src, src_parent, src_tism }, it.data);
         if src_member  break;
     }
     if !src_member  {
-        log("Warning: failed to resolve union member in remap_struct.");
+        // log("Warning: failed to resolve union member in remap_struct.");
         return true;
     }
     assert(src_member.flags & .CONSTANT == 0);
@@ -1080,28 +1088,27 @@ are_structs_equivalent :: (ti1: *Type_Info_Struct, ti2: *Type_Info_Struct) -> bo
     So we want to match the dst union type to what is in the user data and then just verify that the src type is also a union
     In cases where we know we can use src type, we will just have to pass it as union_ti as well
 */
-resolve_union_by_external_tag : Get_Union_Type_Proc : (
-    union_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void
-) -> *Type_Info_Struct_Member {
+resolve_union_by_external_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src: Data_With_Context, data: *void) -> *Type_Info_Struct_Member {
     user_data := data.(*Resolve_Union_By_Tag_Data);
     
-    // log("union_type: %", type_info_to_type(user_data.union_type));
-    
     if union_ti != user_data.union_type  return null;
-    if !src_parent.value_pointer  return null;
-    if !data  return null;
+    if src.parent.value_pointer == null  return null;
+    if data                     == null  return null;
     
-    src_ti := src.type.(*Type_Info_Struct);
+    src_ti := src.data.type.(*Type_Info_Struct);
     assert(src_ti.type == .STRUCT);
     assert(src_ti.textual_flags & .UNION == .UNION);
     
-    dst_tag: s64;
-    src_tag := get_member_any(src_parent.value_pointer, get_field(xx src_parent.type, user_data.tag_member_name));
-    if !remap_data(Any.{ xx user_data.tag_type, *dst_tag }, src_tag)  return null;
+    dst_tag_s64: s64; // used as backing value for dst_tag_any, will be set in the remap_data call below
+    dst_tag_any := Any.{ xx user_data.tag_type, *dst_tag_s64 };
+    
+    src_tag_field := get_field(xx src.parent.type, user_data.tag_member_name);
+    src_tag_any   := get_member_any(src.parent.value_pointer, src_tag_field);
+    if !remap_data(dst_tag_any, src_tag_any)  return null;
     
     src_member_name: string;
     for user_data.lookup {
-        if it.tag_value == dst_tag {
+        if it.tag_value == dst_tag_s64 {
             src_member_name = it.member_name;
             break;
         }
@@ -1118,27 +1125,26 @@ resolve_union_by_external_tag : Get_Union_Type_Proc : (
     return null;
 }
 
-resolve_union_by_internal_tag : Get_Union_Type_Proc : (
-    union_ti: *Type_Info, src: Any, src_parent: Any, src_member_ti: *Type_Info_Struct_Member, data: *void
-) -> *Type_Info_Struct_Member {
+resolve_union_by_internal_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src: Data_With_Context, data: *void) -> *Type_Info_Struct_Member {
     user_data := data.(*Resolve_Union_By_Tag_Data);
     
-    // log("union_type: %", type_info_to_type(user_data.union_type));
-    
     if union_ti != user_data.union_type  return null;
-    if !data  return null;
+    if data == null  return null;
     
-    src_ti := src.type.(*Type_Info_Struct);
+    src_ti := src.data.type.(*Type_Info_Struct);
     assert(src_ti.type == .STRUCT);
     assert(src_ti.textual_flags & .UNION == .UNION);
     
-    dst_tag: s64;
-    src_tag := get_member_any(src.value_pointer, get_field(xx src.type, user_data.tag_member_name));
-    if !remap_data(Any.{ xx user_data.tag_type, *dst_tag }, src_tag)  return null;
+    dst_tag_s64: s64; // used as backing value for dst_tag_any, will be set in the remap_data call below
+    dst_tag_any := Any.{ xx user_data.tag_type, *dst_tag_s64 };
+    
+    src_tag_field := get_field(xx src.data.type, user_data.tag_member_name);
+    src_tag_any   := get_member_any(src.data.value_pointer, src_tag_field);
+    if !remap_data(dst_tag_any, src_tag_any)  return null;
     
     src_member_name: string;
     for user_data.lookup {
-        if it.tag_value == dst_tag {
+        if it.tag_value == dst_tag_s64 {
             src_member_name = it.member_name;
             break;
         }
@@ -1192,22 +1198,22 @@ get_member_any :: (parent_ptr: *void, member_ti: *Type_Info_Struct_Member) -> An
 
 #scope_module
 
-recast_type_info :: (any: Any) -> Any {
+recast_type_info :: (any: Any) -> Any, bool {
     if any.type == type_info(*Type_Info) {
         ti := any.value_pointer.(**Type_Info).*;
         if ti.type == {
-            case .INTEGER;      return Any.{ type_info(*Type_Info_Integer),   any.value_pointer };
-            case .FLOAT;        return Any.{ type_info(*Type_Info_Float),     any.value_pointer };
-            case .STRING;       return Any.{ type_info(*Type_Info_String),    any.value_pointer };
-            case .POINTER;      return Any.{ type_info(*Type_Info_Pointer),   any.value_pointer };
-            case .PROCEDURE;    return Any.{ type_info(*Type_Info_Procedure), any.value_pointer };
-            case .STRUCT;       return Any.{ type_info(*Type_Info_Struct),    any.value_pointer };
-            case .ARRAY;        return Any.{ type_info(*Type_Info_Array),     any.value_pointer };
-            case .ENUM;         return Any.{ type_info(*Type_Info_Enum),      any.value_pointer };
-            case .VARIANT;      return Any.{ type_info(*Type_Info_Variant),   any.value_pointer };
+            case .INTEGER;      return Any.{ type_info(*Type_Info_Integer),   any.value_pointer }, true;
+            case .FLOAT;        return Any.{ type_info(*Type_Info_Float),     any.value_pointer }, true;
+            case .STRING;       return Any.{ type_info(*Type_Info_String),    any.value_pointer }, true;
+            case .POINTER;      return Any.{ type_info(*Type_Info_Pointer),   any.value_pointer }, true;
+            case .PROCEDURE;    return Any.{ type_info(*Type_Info_Procedure), any.value_pointer }, true;
+            case .STRUCT;       return Any.{ type_info(*Type_Info_Struct),    any.value_pointer }, true;
+            case .ARRAY;        return Any.{ type_info(*Type_Info_Array),     any.value_pointer }, true;
+            case .ENUM;         return Any.{ type_info(*Type_Info_Enum),      any.value_pointer }, true;
+            case .VARIANT;      return Any.{ type_info(*Type_Info_Variant),   any.value_pointer }, true;
         }
     }
-    return any;
+    return any, false;
 }
 
 deref_any_pointer :: (any: Any) -> Any, bool {
