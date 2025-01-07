@@ -60,10 +60,10 @@ Conversion_Types :: enum_flags u64 {
 }
 
 Conversion_Settings :: struct {
-    allowed_conversions   : Conversion_Types;
-    float_to_int_rounding : enum { TRUNCATE; FLOOR; CEIL; NEAREST; };
-    pointer_recast_procs  : [..] struct { proc: Pointer_Recast_Proc; data: *void; };
-    get_union_type_procs  : [..] struct { proc: Resolve_Union_Proc; data: *void; };
+    allowed_conversions:    Conversion_Types;
+    float_to_int_rounding:  enum { TRUNCATE; FLOOR; CEIL; NEAREST; };
+    pointer_recast_procs:   [..] struct { proc: Pointer_Recast_Proc; data: *void; };
+    get_union_type_procs:   [..] struct { proc: Resolve_Union_Proc;  data: *void; };
     
     // TODO: probably add some more in-depth rules for struct remapping.
     //       and probably allow overloading these on a per-struct basis
@@ -116,8 +116,6 @@ DEFAULT_CONVERSION_SETTINGS :: Conversion_Settings.{
     allowed_conversions   = .ALL,
     float_to_int_rounding = .TRUNCATE,
 };
-
-
 
 
 
@@ -1076,12 +1074,14 @@ are_structs_equivalent :: (ti1: *Type_Info_Struct, ti2: *Type_Info_Struct) -> bo
 
 
 /*
-    resolve union by tag
+    For use in cases where a union's type is determined by some tag in the parent struct.
     
-    we need to have a *void for data so that we can attach some lookup table 
-        to map from tag value to union member name
+    Some_Struct :: struct {
+        union_type: enum  { ... };
+        some_union: union { ... };
+    }
     
-    we can also write a proc to generate the lookup Resolve_Union_By_Tag_Data for Tagged_Union
+    TODO: write a proc to generate the lookup Resolve_Union_By_Tag_Data for Tagged_Union
     
     I should document this because I forgot it and then had to figure out why I did it this way again...
     So the reason there's a union_ti passed in here is because we can't actually match on src type, since it may be some dynamically loaded type info
@@ -1125,6 +1125,36 @@ resolve_union_by_external_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src:
     return null;
 }
 
+/*
+    For when all union members share some common base type, and that base type contains the type tag for the union.
+    
+    Entity_Type :: enum { .KNIGHT; .GOBLIN; ... };
+    Entity_Base :: struct {
+        entity_type:    Entity_Type;
+        health:         int;
+        ...
+    }
+    Knight :: struct { 
+        using #as base: Entity_Base;
+        ...
+    }
+    Goblin :: struct { 
+        using #as base: Goblin;
+        ...
+    }
+    Entity_Union :: union {
+        using #as base: Entity_Base;
+        knight:         Knight;
+        goblin:         Goblin;
+        ...
+    }
+    
+    resolve_entity_union_data := Resolve_Union_By_Tag_Data.{ "type", type_info(Entity_Union), type_info(Entity_Type), .[
+        .{ xx Entity_Type.KNIGHT,  "knight" },
+        .{ xx Entity_Type.GOBLIN,  "goblin" },
+    ]};
+    array_add(*context.data_packer.conversion_settings.get_union_type_procs, .{ resolve_union_by_tag, resolve_entity_union_data });
+*/
 resolve_union_by_internal_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src: Data_With_Context, data: *void) -> *Type_Info_Struct_Member {
     user_data := data.(*Resolve_Union_By_Tag_Data);
     

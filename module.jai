@@ -36,10 +36,14 @@
     This is also an easy way to shift to/from a more purpose-built file format from/to the data packer.
     
     
+    TODO:
+        1. provide some example for handling versioning
+        2. finish implementing and provide example of local data pointers for .POINTER, .TYPE, and .PROCEDURE
+        2. write versions of remapping procedures that take Data_With_Context, so that user callbacks can be more useful
+        3. consider merging remapping and unpacking
+            a. main reason being, we can better handle unpacking of unions and pointer recasting
+            b. will require using Data_With_Context for both unpacking and remapping procs
     
-    1. changes to special serialization procs is likely to result in crashing or junk data if those procedures are not careful to preserve compatibility across versions.
-    
-     
     
 */
 
@@ -112,26 +116,20 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
 }
 
 
-// TODO: consider reimplementing the Data_Chunk thing, this will probably give us more flexibility in the future
-
-// TODO: Perhaps all array types should just be encoded as array views. 
-//       This breaks the ability to simply memcpy many data types, but we already weren't able to do that...
-//       Plus, we're already gonna do some weird stuff for procedure pointers methinks
-//       First, need to just better cosider when we can shortcut with a memcpy
-//           we can memcpy structs when there are no pointers involved and types are equivalent
-//           we can memcpy fixed arrays if inner type is memcpy-able
-
-
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
+// TODO: use a dynamic array so that we don't have to actually realloc as often as we resize the buffer
 pack_data :: (data: Any, buffer: *[]u8) -> bool {
+    Pointer_And_Offset :: struct { pointer: *void; offset: s64; };
+
     recurse :: (
-        src:            Data_With_Context,
-        buffer:         *[] u8, 
-        write_offset:   s64, 
-        pointer_map:    *Table(*void, s64)
+        src:                Data_With_Context,
+        buffer:             *[] u8, 
+        write_offset:       s64, 
+        packed_pointers:    *[..] Pointer_And_Offset
     ) -> bool {
         // print("Writing % at offset %\n", (*data.type).(*Type).*, write_offset);
         
+        // TODO: .TYPE and .PROCEDURE can maybe be handled using special user callbacks
         if src.data.type.type == {
           case .STRUCT;
             ti_struct := src.data.type.(*Type_Info_Struct);
@@ -147,7 +145,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
                     assert(member.flags & .CONSTANT == 0);
                     // log("Resolved union member for union of type % to %", (*src.data.type).(*Type).*, (*member.type).(*Type).*);
                     member_any := Any.{ member.type, src.data.value_pointer + member.offset_in_bytes };
-                    if !recurse(.{ member_any, src.data, member }, buffer, write_offset + member.offset_in_bytes, pointer_map) {
+                    if !recurse(.{ member_any, src.data, member }, buffer, write_offset + member.offset_in_bytes, packed_pointers) {
                         return false;
                     }
                 }
@@ -162,7 +160,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
                 
                 add_debug_trace(".%", member.name);
                 member_any := Any.{ member.type, src.data.value_pointer + member.offset_in_bytes };
-                if !recurse(.{ member_any, src.data, member }, buffer, write_offset + member.offset_in_bytes, pointer_map) {
+                if !recurse(.{ member_any, src.data, member }, buffer, write_offset + member.offset_in_bytes, packed_pointers) {
                     return false;
                 }
             }
@@ -196,7 +194,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
             elem_any := Any.{ ti_array.element_type, array_data };
             for 0..array_count-1 {
                 add_debug_trace("[%]", it);
-                if !recurse(.{ elem_any, src.data, null }, buffer, data_write_offset, pointer_map) {
+                if !recurse(.{ elem_any, src.data, null }, buffer, data_write_offset, packed_pointers) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
@@ -236,6 +234,9 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
                     if done { ptr_any = recast_ptr_any; break; }
                 }
             }
+            if ptr_any.type != src.data.type {
+                print("recast a pointer: % -> %\n", (*src.data.type).(*Type).*, (*ptr_any.type).(*Type).*);
+            }
             
             // ENCODE LOCAL DATA POINTERS
             // pack_local_ptr := context.data_packer.pack_local_data_pointer;
@@ -250,17 +251,18 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
             // }
             
             // DEREF AND RECURSE, IF NOT ALREADY WRITTEN
-            ptr_offset, found := table_find(pointer_map, raw_pointer);
-            if !found {
+            ptr_offset := -1;
+            for packed_pointers.*  if it.pointer == raw_pointer { ptr_offset = it.offset; break; };
+            if ptr_offset == -1 {
                 ptr_offset = buffer.count;
-                table_add(pointer_map, raw_pointer, ptr_offset);
+                array_add(packed_pointers, .{ raw_pointer, ptr_offset });
                 
-                ti_derefed := ptr_any.type.(*Type_Info_Pointer).pointer_to;
-                array_resize(buffer, buffer.count + ti_derefed.runtime_size);
+                type_pointed_to := ptr_any.type.(*Type_Info_Pointer).pointer_to;
+                array_resize(buffer, buffer.count + type_pointed_to.runtime_size);
                 
                 // current parent and struct member info passed through pointer dereference
-                derefed_any := Any.{ ti_derefed, raw_pointer };
-                if !recurse(.{ derefed_any, src.parent, src.struct_member_info }, buffer, ptr_offset, pointer_map) {
+                derefed_any := Any.{ type_pointed_to, raw_pointer };
+                if !recurse(.{ derefed_any, src.parent, src.struct_member_info }, buffer, ptr_offset, packed_pointers) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
@@ -272,15 +274,14 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
         return true;
     }
     
-    // TODO: could probably just use flat array of pointer/offset pairs and be faster
-    pointer_map: Table(*void, s64);
-    defer deinit(*pointer_map);
+    packed_pointers: [..] Pointer_And_Offset;
+    defer array_free(packed_pointers);
     
     #if DEBUG  array_reset_keeping_memory(*debug_trace);
     add_debug_trace("DATA");
     
     array_resize(buffer, data.type.runtime_size);
-    if !recurse(.{ data = data }, buffer, 0, *pointer_map) {
+    if !recurse(.{ data = data }, buffer, 0, *packed_pointers) {
         return false;
     }
     
@@ -396,12 +397,18 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                 
                 // maybe recast the pointer to a different type
                 // type info cases are built in and run first, then user cases are run
+                // NOTE: The type info recast here will only work when unpacking with type info that is not dynamically loaded.
+                //       So this will work when we are loading our type info file, but will not do anything when using the loaded type info to unpack a data file.
+                //       This should be fine, since your data file probably doesn't contain any pointers to type info, but if they do, note that this recast will not occur!
                 ptr_any, done := recast_type_info(Any.{ type, ptr_ptr });
                 if !done {
                     for context.data_packer.conversion_settings.pointer_recast_procs {
                         recast_ptr_any:, done = it.proc(.{ ptr_any, null, null }, it.data);
                         if done { ptr_any = recast_ptr_any; break; }
                     }
+                }
+                if ptr_any.type != type {
+                    print("recast a pointer: % -> %\n", (*type).(*Type).*, (*ptr_any.type).(*Type).*);
                 }
                 
                 type_pointed_to := ptr_any.type.(*Type_Info_Pointer).pointer_to;
@@ -410,7 +417,6 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                     return false;
                 }
             }
-            
         }
         return true;
     }
@@ -545,5 +551,4 @@ array_reserve_nonpoly :: (array: *Resizable_Array, desired_items: s64, elem_size
     
     array.allocated = desired_items;
 }
-
 
