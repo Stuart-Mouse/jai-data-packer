@@ -125,30 +125,29 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
 pack_data :: (data: Any, buffer: *[]u8) -> bool {
     recurse :: (
-        using src:      Data_With_Context,  // TODO: rewrite proc so we can remove using
+        src:            Data_With_Context,
         buffer:         *[] u8, 
         write_offset:   s64, 
         pointer_map:    *Table(*void, s64)
     ) -> bool {
-        // print("Writing % at offset %\n", (cast(*Type)*data.type).*, write_offset);
-        // print("Writing % at offset %\n", data.type.*, write_offset);
+        // print("Writing % at offset %\n", (*data.type).(*Type).*, write_offset);
         
-        if data.type.type == {
+        if src.data.type.type == {
           case .STRUCT;
-            ti_struct := data.type.(*Type_Info_Struct);
+            ti_struct := src.data.type.(*Type_Info_Struct);
             
             if ti_struct.textual_flags & .UNION {
                 member: *Type_Info_Struct_Member;
                 for context.data_packer.conversion_settings.get_union_type_procs {
-                    member = it.proc(data.type, .{ data, parent, struct_member_info }, it.data);
+                    member = it.proc(src.data.type, src, it.data);
                     if member  break;
                 }
                 // If 'member' was not set, this is not necessarily treated as an error. Perhaps the union was just empty.
                 if member {
                     assert(member.flags & .CONSTANT == 0);
-                    log("Resolved union member for union of type % to %", (*data.type).(*Type).*, (*member.type).(*Type).*);
-                    member_any := Any.{ member.type, data.value_pointer + member.offset_in_bytes };
-                    if !recurse(.{ member_any, data, member }, buffer, write_offset + member.offset_in_bytes, pointer_map) {
+                    // log("Resolved union member for union of type % to %", (*src.data.type).(*Type).*, (*member.type).(*Type).*);
+                    member_any := Any.{ member.type, src.data.value_pointer + member.offset_in_bytes };
+                    if !recurse(.{ member_any, src.data, member }, buffer, write_offset + member.offset_in_bytes, pointer_map) {
                         return false;
                     }
                 }
@@ -164,81 +163,80 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
                 array_add(*debug_trace, member.name);
                 defer pop(*debug_trace);
                 
-                member_any := Any.{ member.type, data.value_pointer + member.offset_in_bytes };
-                if !recurse(.{ member_any, data, member }, buffer, write_offset + member.offset_in_bytes, pointer_map) {
+                member_any := Any.{ member.type, src.data.value_pointer + member.offset_in_bytes };
+                if !recurse(.{ member_any, src.data, member }, buffer, write_offset + member.offset_in_bytes, pointer_map) {
                     return false;
                 }
             }
             
           case .ARRAY;
-            data_offset: s64   = ---; // destination for copied data
-            src_data:    *void = ---; // base pointer for source data
-            elem_count:  int   = ---;
+            data_write_offset: s64   = ---;
+            array_data:        *void = ---;
+            array_count:       int   = ---;
             
-            ti_array := data.type.(*Type_Info_Array);
+            ti_array := src.data.type.(*Type_Info_Array);
             if ti_array.array_type != .FIXED {
-                raw_array  := data.value_pointer.(*Resizable_Array).*;
-                src_data    = raw_array.data;
-                elem_count  = raw_array.count;
-                data_offset = buffer.count; // elements will be written to end of buffer
+                raw_array        := src.data.value_pointer.(*Resizable_Array).*;
+                array_data        = raw_array.data;
+                array_count       = raw_array.count;
+                data_write_offset = buffer.count; // elements will be written to end of buffer
                 
                 // when array count is 0, we don't want to set the array's data pointer
                 if raw_array.data == null || raw_array.count == 0 {
                     raw_array = .{}; // just make it all zero'd to be safe
                 } else {
-                    raw_array.data = buffer.count.(*void);
+                    raw_array.data = data_write_offset.(*void);
                     array_resize(buffer, buffer.count + (ti_array.element_type.runtime_size * raw_array.count));
                 }
-                memcpy(*buffer.data[write_offset], *raw_array, data.type.runtime_size);   // this will work for both resizable and slice because we use the orig data any's runtime size
+                memcpy(*buffer.data[write_offset], *raw_array, src.data.type.runtime_size);   // this will work for both resizable and slice because we use src.data.type.runtime_size
             } else {
-                src_data    = data.value_pointer;
-                elem_count  = ti_array.array_count;
-                data_offset = write_offset;
+                array_data        = src.data.value_pointer;
+                array_count       = ti_array.array_count;
+                data_write_offset = write_offset;
             }
             
-            elem_any := Any.{ ti_array.element_type, src_data };
-            for 0..elem_count-1 {
+            elem_any := Any.{ ti_array.element_type, array_data };
+            for 0..array_count-1 {
                 array_add(*debug_trace, tprint("[%]", it));
                 defer pop(*debug_trace);
                 
-                if !recurse(.{ elem_any, data, null }, buffer, data_offset, pointer_map) {
+                if !recurse(.{ elem_any, src.data, null }, buffer, data_write_offset, pointer_map) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
                 elem_any.value_pointer += ti_array.element_type.runtime_size;
-                data_offset            += ti_array.element_type.runtime_size;
+                data_write_offset      += ti_array.element_type.runtime_size;
             }
             
           case .BOOL;    #through;
           case .ENUM;    #through;
           case .INTEGER; #through;
           case .FLOAT;   
-            memcpy(*buffer.data[write_offset], data.value_pointer, data.type.runtime_size);
+            memcpy(*buffer.data[write_offset], src.data.value_pointer, src.data.type.runtime_size);
             
           case .STRING;
-            str     := data.value_pointer.(*string).*;
-            str_dst := buffer.count;
+            str := src.data.value_pointer.(*string).*;
+            data_write_offset := buffer.count;
             
-            // print("Writing string data at offset %\n", str_dst);
             array_resize(buffer, buffer.count + str.count);
-            memcpy(*buffer.data[str_dst], str.data, str.count);
+            memcpy(*buffer.data[data_write_offset], str.data, str.count);
             
-            str.data = str_dst.(*u8);
+            str.data = data_write_offset.(*u8);
             memcpy(*buffer.data[write_offset], *str, size_of(string));
             
           case .POINTER;
             #assert(size_of(*void) == size_of(s64));
-            raw_pointer := data.value_pointer.(**void).*;
+            raw_pointer := src.data.value_pointer.(**void).*;
             if raw_pointer == null {
                 memset(*buffer.data[write_offset], 0, size_of(*void));
                 return true;
             }
             
             // maybe recast pointer to more specific type
-            ptr_any, done := recast_type_info(data);
+            ptr_any, done := recast_type_info(src.data);
             if !done {
                 for context.data_packer.conversion_settings.pointer_recast_procs {
-                    recast_ptr_any:, done = it.proc(.{ ptr_any, null, null }, it.data);
+                    recast_ptr_any:, done = it.proc(.{ ptr_any, src.parent, src.struct_member_info }, it.data);
                     if done { ptr_any = recast_ptr_any; break; }
                 }
             }
@@ -255,7 +253,6 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
             //     return true; // we don't need to continue to pack data below, since it is internal data
             // }
             
-            
             // DEREF AND RECURSE, IF NOT ALREADY WRITTEN
             ptr_offset, found := table_find(pointer_map, raw_pointer);
             if !found {
@@ -267,7 +264,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
                 
                 // current parent and struct member info passed through pointer dereference
                 derefed_any := Any.{ ti_derefed, raw_pointer };
-                if !recurse(.{ derefed_any, parent, struct_member_info }, buffer, ptr_offset, pointer_map) {
+                if !recurse(.{ derefed_any, src.parent, src.struct_member_info }, buffer, ptr_offset, pointer_map) {
                     print("Error while packing data for array.\n");
                     return false;
                 }
@@ -293,13 +290,6 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
     return true;
 }
 
-// DEBUG
-array_pointers_adjusted: [..] struct {
-    ptr:    *void;
-    trace:  [] string;
-};
-
-
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
 // we can't figure out where all pointers are within blob without just doing the whole recursive thing
 // but we may have multiple pointers that point to the same data
@@ -309,8 +299,6 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
         buffer:             *[] u8, 
         offset:             s64, 
         unpacked_offsets:   *[..] s64
-        // parent:             Any,
-        // data_tism:          *Type_Info_Struct_Member,
     ) -> bool {
         // print("Unpacking data of type % at offset %\n", type.*, offset);
         // data := Any.{ type, *buffer[offset] };
@@ -323,9 +311,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
             // the problem is that we really can't use the type info here in our union resolution procs as we would in remap or pack procs
             // because we can't recognize the type tag value itself. perhaps we could use the type's name to try and do the resolution?
             // Or, theoretically, maybe we should do the remapping at the same time that we are unpacking the data?
-            if ti_struct.textual_flags & .UNION {
-                return true;
-            }
+            if ti_struct.textual_flags & .UNION  return true;
             
             last_member_offset := -1;
             for member: ti_struct.members {
