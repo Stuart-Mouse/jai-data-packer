@@ -160,9 +160,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
                 if member.offset_in_bytes < last_member_offset  break; 
                 last_member_offset = member.offset_in_bytes;
                 
-                array_add(*debug_trace, member.name);
-                defer pop(*debug_trace);
-                
+                add_debug_trace(".%", member.name);
                 member_any := Any.{ member.type, src.data.value_pointer + member.offset_in_bytes };
                 if !recurse(.{ member_any, src.data, member }, buffer, write_offset + member.offset_in_bytes, pointer_map) {
                     return false;
@@ -197,9 +195,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
             
             elem_any := Any.{ ti_array.element_type, array_data };
             for 0..array_count-1 {
-                array_add(*debug_trace, tprint("[%]", it));
-                defer pop(*debug_trace);
-                
+                add_debug_trace("[%]", it);
                 if !recurse(.{ elem_any, src.data, null }, buffer, data_write_offset, pointer_map) {
                     print("Error while packing data for array.\n");
                     return false;
@@ -280,7 +276,8 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
     pointer_map: Table(*void, s64);
     defer deinit(*pointer_map);
     
-    array_reset_keeping_memory(*debug_trace);
+    #if DEBUG  array_reset_keeping_memory(*debug_trace);
+    add_debug_trace("DATA");
     
     array_resize(buffer, data.type.runtime_size);
     if !recurse(.{ data = data }, buffer, 0, *pointer_map) {
@@ -297,11 +294,10 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
     recurse :: (
         type:               *Type_Info, 
         buffer:             *[] u8, 
-        offset:             s64, 
+        read_offset:        s64, 
         unpacked_offsets:   *[..] s64
     ) -> bool {
-        // print("Unpacking data of type % at offset %\n", type.*, offset);
-        // data := Any.{ type, *buffer[offset] };
+        // print("Unpacking data of type % at offset %\n", recast_type_info(Any.{ type, *buffer[read_offset] }), offset);
         
         if type.type == {
           case .STRUCT;
@@ -320,21 +316,20 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                 if member.offset_in_bytes < last_member_offset  break; 
                 last_member_offset = member.offset_in_bytes;
                 
-                array_add(*debug_trace, member.name);
-                defer pop(*debug_trace);
-                if !recurse(member.type, buffer, offset + member.offset_in_bytes, unpacked_offsets) {
+                add_debug_trace(".%", member.name);
+                if !recurse(member.type, buffer, read_offset + member.offset_in_bytes, unpacked_offsets) {
                     print("Error while unpacking data for struct member.\n");
                     return false;
                 }
             }
             
           case .ARRAY;
-            data_offset: s64 = ---;
-            elem_count:  int = ---;
+            array_data:  s64 = ---;
+            array_count: int = ---;
             
             ti_array := type.(*Type_Info_Array);
             if ti_array.array_type != .FIXED {
-                raw_array     := (*buffer.data[offset]).(*Resizable_Array);
+                raw_array := (*buffer.data[read_offset]).(*Resizable_Array);
                 
                 // to be safe, make sure array has valid data and count before trying to unpack
                 // previously, we were writing invalid arrays (zero count, non-zero data offset) during packing and it was causing us to have weird behavior here when unpacking
@@ -343,31 +338,31 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                 
                 assert(raw_array.data.(u64) >= 0 && raw_array.data.(u64) < buffer.count.(u64));
                 
-                data_offset    = raw_array.data.(s64);
-                elem_count     = raw_array.count;
-                raw_array.data = ifx data_offset != 0 then buffer.data + data_offset;
+                array_data     = raw_array.data.(s64);
+                array_count    = raw_array.count;
+                raw_array.data = buffer.data + array_data;
             } else {
-                data_offset = offset;
-                elem_count  = ti_array.array_count;
+                array_data  = read_offset;
+                array_count = ti_array.array_count;
             }
             
-            for 0..elem_count-1 {
-                array_add(*debug_trace, tprint("[%]", it));
-                defer pop(*debug_trace);
-                if !recurse(ti_array.element_type, buffer, data_offset, unpacked_offsets) {
+            elem_read_offset := array_data;
+            for 0..array_count-1 {
+                add_debug_trace("[%]", it);
+                if !recurse(ti_array.element_type, buffer, elem_read_offset, unpacked_offsets) {
                     print("Error while unpacking data for array.\n");
                     return false;
                 }
-                data_offset += ti_array.element_type.runtime_size;
+                elem_read_offset += ti_array.element_type.runtime_size;
             }
             
           case .STRING;
-            str := (*buffer.data[offset]).(*string);
+            str := (*buffer.data[read_offset]).(*string);
             assert(str.data.(u64) >= 0 && str.data.(u64) < buffer.count.(u64));
             str.data = buffer.data + str.data.(s64);
             
           case .POINTER;
-            ptr_ptr := (*buffer.data[offset]).(**void);
+            ptr_ptr := (*buffer.data[read_offset]).(**void);
             if ptr_ptr.* != null {
                 packed_ptr := ptr_ptr.(**void).*;
                 
@@ -423,7 +418,8 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
     unpacked_offsets: [..] s64;
     defer array_free(unpacked_offsets);
     
-    array_reset_keeping_memory(*debug_trace);
+    #if DEBUG  array_reset_keeping_memory(*debug_trace);
+    add_debug_trace("DATA");
     
     if !recurse(type, buffer, 0, *unpacked_offsets) {
         return Any.{}, false;
@@ -498,10 +494,18 @@ decode_local_data_pointer :: inline (ptr: *void) -> (ptr_data: u32, user_data: u
 }
 
 
-debug_trace: [..] string;
+#if DEBUG  debug_trace: [..] string;
 
+add_debug_trace :: (format: string, args: ..Any) #expand {
+    #if DEBUG {
+        array_add(*debug_trace, tprint(format, ..args));
+        `defer pop(*debug_trace);
+    }
+} @PrintLike
 
 #scope_module
+
+DEBUG :: false;
 
 // copied from how_to/170_modify.jai
 Dynamic_New :: (ti: *Type_Info, initialized := true) -> *void {
