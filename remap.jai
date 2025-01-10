@@ -251,9 +251,11 @@ remap_struct :: (dst: Any, src: Any) -> bool {
             // then we will fallback to trying to look for the members of the using'd member in the top level of src struct
             // this should allow the remapper to catch cases where you factor out some member into a another struct and then 'using' that new struct in the old struct 
             if dst_member.flags & .USING {
+                print("remapping src to using'd member % (%)\n", dst_member.name, type_info_to_type(dst_member.type));
+            
                 dst_member_any := Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes };
                 if !remap_data(dst_member_any, src)  {
-                    log("failed while remapping struct member %!", dst_member.name);
+                    log("Error: failed while remapping struct member %!", dst_member.name);
                     return false;
                 }
             }
@@ -268,13 +270,13 @@ remap_struct :: (dst: Any, src: Any) -> bool {
         
         if type_is_union(dst_member.type) {
             if !remap_union(dst_member_any, src_member_any, src, src_member)  {
-                log("failed while remapping struct member (union) %!", dst_member.name);
+                log("Error: failed while remapping struct member (union) %!", dst_member.name);
                 return false;
             }
         } else {
             // TODO: what if src is union, but dst is not?
             if !remap_data(dst_member_any, src_member_any)  {
-                log("failed while remapping struct member %!", dst_member.name);
+                log("Error: failed while remapping struct member %!", dst_member.name);
                 return false;
             }
         }
@@ -303,7 +305,7 @@ remap_struct :: (dst: Any, src: Any) -> bool {
     
     TODO: should we pass Data with context for src data here?
 */
-remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct_Member) -> bool {
+remap_union :: (dst: Any, src: Any, src_parent: Any, src_member_info: *Type_Info_Struct_Member) -> bool {
     settings := context.data_packer.conversion_settings;
     
     assert(dst.type.type == .STRUCT);
@@ -323,7 +325,7 @@ remap_union :: (dst: Any, src: Any, src_parent: Any, src_tism: *Type_Info_Struct
     
     src_member: *Type_Info_Struct_Member;
     for settings.get_union_type_procs {
-        src_member = it.proc(dst.type, .{ src, src_parent, src_tism }, it.data);
+        src_member = it.proc(dst.type, .{ src, src_parent, src_member_info }, it.data);
         if src_member  break;
     }
     if !src_member  {
@@ -470,7 +472,7 @@ remap_array :: (dst: Any, src: Any) -> bool {
     
     if !is_allowed(conversion_type) {
         if conversion_type 
-            then log_disallowed_conversion(conversion_type, "remap_array");
+            then log_disallowed_conversion (conversion_type, "remap_array");
             else log_unsupported_conversion(conversion_type, "remap_array");
         return false;
     }
@@ -486,13 +488,13 @@ remap_array :: (dst: Any, src: Any) -> bool {
         raw_array := _src.value_pointer.(*Resizable_Array);
         src_data       = raw_array.data;
         src_elem_count = raw_array.count;
-    }             
+    }
     
     if src_data == null || src_elem_count == 0  return true;
     
     
-    dst_data       : *void = ---;
-    dst_elem_count : int   = ---;
+    dst_data:       *void = ---;
+    dst_elem_count: int   = ---;
     
     if dst_ti.array_type == {
       case .FIXED;
@@ -500,16 +502,20 @@ remap_array :: (dst: Any, src: Any) -> bool {
         dst_elem_count = dst_ti.array_count;
         
       case .VIEW;
-        raw_array := dst.value_pointer.(*Resizable_Array);
+        raw_array := dst.value_pointer.(*Array_View_64);
         dst_data       = raw_array.data;
         dst_elem_count = raw_array.count;
-        if dst_data == null || dst_elem_count < 0 {
+        if dst_data == null {
+            assert(dst_elem_count == 0, "dst_elem_count was %", dst_elem_count);
             // TODO: set allocators for array views' data
             raw_array.data  = alloc(src_elem_count * dst_ti.element_type.runtime_size);
+            memset(raw_array.data, 0, src_elem_count * dst_ti.element_type.runtime_size);
             raw_array.count = src_elem_count;
             
             dst_data       = raw_array.data;
             dst_elem_count = raw_array.count;
+        } else {
+            log("array view data was non-null: data %, count %", raw_array.data, raw_array.count);
         }
         
       case .RESIZABLE;
@@ -523,6 +529,7 @@ remap_array :: (dst: Any, src: Any) -> bool {
     
     if dst_data == null || dst_elem_count == 0 {
         log("Error: array was null or empty");
+        print_stack_trace(context.stack_trace, to_standard_error = false);
         return false;
     }
     
@@ -539,6 +546,7 @@ remap_array :: (dst: Any, src: Any) -> bool {
     // }
     
     for 0..min_count-1 {
+        // log("remapping array index %", it);
         if !remap_data(dst_elem_any, src_elem_any) {
             log("Error: unable to remap data");
             return false;

@@ -235,7 +235,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
                 }
             }
             if ptr_any.type != src.data.type {
-                print("recast a pointer: % -> %\n", (*src.data.type).(*Type).*, (*ptr_any.type).(*Type).*);
+                // print("recast a pointer: % -> %\n", (*src.data.type).(*Type).*, (*ptr_any.type).(*Type).*);
             }
             
             // ENCODE LOCAL DATA POINTERS
@@ -408,7 +408,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                     }
                 }
                 if ptr_any.type != type {
-                    print("recast a pointer: % -> %\n", (*type).(*Type).*, (*ptr_any.type).(*Type).*);
+                    // print("recast a pointer: % -> %\n", (*type).(*Type).*, (*ptr_any.type).(*Type).*);
                 }
                 
                 type_pointed_to := ptr_any.type.(*Type_Info_Pointer).pointer_to;
