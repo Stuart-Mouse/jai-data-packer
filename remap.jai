@@ -214,18 +214,6 @@ remap_struct :: (dst: Any, src: Any) -> bool {
     dst_ti := dst.type.(*Type_Info_Struct);
     src_ti := src.type.(*Type_Info_Struct);
     
-    
-    // we can provide some instances of this proc type for common methods of disambiguationg union type
-    // e.g. one for Tagged_Union (polymorphic, or as Any), one for separate type tag, one for enum -> Type mapping table
-    // maybe even one using struct member note to determine tag for union
-    
-    
-    // if dst is a union, then we need to know which member ot use
-    // but the problem is we can only determine which member is set in src
-    // we also want to be able to go from any type to union if union contains compatible member?
-    //      but we also need some means to set dst tag from src?
-    // 
-    
     /*
         NOTE: ignoring #place struct members
         
@@ -235,17 +223,13 @@ remap_struct :: (dst: Any, src: Any) -> bool {
         Generally, most #place members are used to provide an alternative way of accessing the data held in a struct, for example:
             'xy' and 'yz' members in a Vector3
             'floats' and 'coefs' members in a mat4
-        These are essentially 0-cost getters, or an alternativ einterface to the same underlying data.
+        These are essentially 0-cost getters, or an alternative interface to the same underlying data.
         
         This is unlike a union, because a union is typically storing two different pieces of data in the same memory space.
         I am sure there is probably some niche use case for #place where the members actually serve to encode unique data, but since it is uncommon, I have not really considered how to make affordances for that use case.
     */
     
-    
-    
     // TODO: once we have union working, we can go back to using <= in the below #place checks
-    
-    // TODO: if src_union_member, then only match this one member to dst
     
     // remap elements by name
     last_dst_member_offset := -1;
@@ -256,65 +240,42 @@ remap_struct :: (dst: Any, src: Any) -> bool {
         }
         last_dst_member_offset = dst_member.offset_in_bytes;
         
+        // TODO: I am probably not handling the case where a using is on a union, but aaaaaahhhhh 
         
-        last_src_member_offset := -1;
-        for src_member: src_ti.members {
-            if src_member.flags & .CONSTANT  continue;
-            if src_member.offset_in_bytes < last_src_member_offset  {
-                break; // ignoring #place members. Wish there were a better way to do this.
-            }
-            last_src_member_offset = src_member.offset_in_bytes;
-            
-            if dst_member.name == src_member.name {
-                // print("remapping member % to % (%)\n", src_member.name, dst_member.name, type_info_to_type(dst_member.type));
-                
-                /*
-                    We have to handle unions here, since we have the context of them as struct members
-                    (unfortunately, because now we have a fat ass loop here)
-                
-                    if dst_member is union
-                        if src_member is union
-                            determine src type
-                            match member from src -> dst
-                        else
-                            if dst contains member of src type
-                            (in this case, we can't set any tag for dst (unless we wanted to have a callback for that, but that sounds horrible tbh))
-                    
-                    
-                    new problem
-                    
-                    we can't do a switch on type inside a user callback to determine parent struct type
-                    because this may be a dynamically loaded type info
-                    so then the only option is to do a compare on the struct name
-                        maybe that's just what we have to deal with, OR...
-                        (name compare is problematic especially for parameterized structs, but also just for name changes)
-                    
-                    maybe we should pass the dst type info as well, so the user can check that to figure what rule to apply
-                        then attempt to apply that rule to src data
-                        
-                    
-                    do we actually care to pass the src Type info struct member?
-                        does not seem to provide any useful additional data...
-                    
-                */
-                
+        // use of get_field here should probably not result in any unintentional redundant copying of fields I think?
+        // but maybe if we have some memory leak show up at some point, this is a place to keep in mind...
+        src_member := get_field(src_ti, dst_member.name);
+        if src_member == null {
+            // I'm not sure if this could have unintended side-effects,
+            // but the idea here is that if we can't find a match for a member that has a using on it, 
+            // then we will fallback to trying to look for the members of the using'd member in the top level of src struct
+            // this should allow the remapper to catch cases where you factor out some member into a another struct and then 'using' that new struct in the old struct 
+            if dst_member.flags & .USING {
                 dst_member_any := Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes };
-                src_member_any := Any.{ src_member.type, src.value_pointer + src_member.offset_in_bytes };
-                
-                if type_is_union(dst_member.type) {
-                    if !remap_union(dst_member_any, src_member_any, src, *src_member)  {
-                        log("failed while remapping struct member (union) %!", dst_member.name);
-                        return false;
-                    }
-                } else {
-                    // TODO: what if src is union, but dst is not?
-                    if !remap_data(dst_member_any, src_member_any)  {
-                        log("failed while remapping struct member %!", dst_member.name);
-                        return false;
-                    }
+                if !remap_data(dst_member_any, src)  {
+                    log("failed while remapping struct member %!", dst_member.name);
+                    return false;
                 }
-                
-                break src_member;
+            }
+            continue;
+        }
+        if src_member.flags & .CONSTANT  continue;
+        
+        // print("remapping member % to % (%)\n", src_member.name, dst_member.name, type_info_to_type(dst_member.type));
+        
+        dst_member_any := Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes };
+        src_member_any := Any.{ src_member.type, src.value_pointer + src_member.offset_in_bytes };
+        
+        if type_is_union(dst_member.type) {
+            if !remap_union(dst_member_any, src_member_any, src, src_member)  {
+                log("failed while remapping struct member (union) %!", dst_member.name);
+                return false;
+            }
+        } else {
+            // TODO: what if src is union, but dst is not?
+            if !remap_data(dst_member_any, src_member_any)  {
+                log("failed while remapping struct member %!", dst_member.name);
+                return false;
             }
         }
     }
@@ -871,7 +832,6 @@ any_to_bool :: (dst: Any, src: Any) -> bool {
     }
     return false;
 }
-
 
 is_narrowing_int :: (dst_ti: *Type_Info_Integer, src_ti: *Type_Info_Integer) -> bool {
     if src_ti.runtime_size > dst_ti.runtime_size  return true;
