@@ -41,6 +41,10 @@ Conversion_Types :: enum_flags u64 {
     VIEW_TO_FIXED_ARRAY;    // also applies to resizable
     FIXED_ARRAY_OR_VIEW_TO_RESIZABLE;   // invloves setting allocators somehow...
     
+    STRING_TO_FIXED_ARRAY;
+    STRING_TO_VIEW;
+    STRING_TO_RESIZABLE;
+    
     COPY_VIEW; // copy the actual underlying data pointed to by array views, so that dst view owns the underlying data.
     
     
@@ -134,10 +138,29 @@ remap_data :: (dst: Any, src: Any) -> bool {
     
     if dst.type.type == {
       case .STRING;
-        if src.type.type != dst.type.type  return false; 
-        // TODO: we would like to have an option as to whether this should copy
-        dst.value_pointer.(*string).* = copy_string(src.value_pointer.(*string).*);
-        return true;
+        if src.type.type == .STRING {
+            // TODO: we would like to have an option as to whether this should copy
+            dst.value_pointer.(*string).* = copy_string(src.value_pointer.(*string).*);
+            return true;
+        }
+        // array-to-string conversion
+        // TODO: add conversion settings for this
+        if src.type.type == .ARRAY {
+            ti_array := src.type.(*Type_Info_Array);
+            // cannot just compare to type_info(u8), since src is probably dynamically loaded
+            // so instead we assume that any type with runtime size of 1 is probably u8... 
+            if ti_array.element_type.runtime_size == 1  return false; 
+            if ti_array.array_type == .FIXED {
+                dst_string := dst.value_pointer.(*string);
+                memcpy(dst_string.data, src.value_pointer, ti_array.array_count);
+                dst_string.count = ti_array.array_count;
+            } else {
+                // TODO: we would like to have an option as to whether this should copy
+                dst.value_pointer.(*string).* = copy_string(src.value_pointer.(*string).*);
+            }
+            return true;
+        }
+        return false;
         
       case .BOOL;
         return any_to_bool(dst, src);
@@ -426,6 +449,23 @@ remap_array :: (dst: Any, src: Any) -> bool {
     
     conversion_type: Conversion_Types = .UNKNOWN_CONVERSION;
     
+    
+    // remap string to array of u8
+    // TODO: add checks on conversion rules for these cases
+    if src_ti.type == .STRING && dst_ti.element_type == type_info(u8) {
+        src_string := src.value_pointer.(*string);
+        if dst_ti.array_type == {
+          case .FIXED;
+            memcpy(dst.value_pointer, src_string.data, src_string.count);
+          case .VIEW;
+            // TODO: we would like to have an option as to whether this should copy
+            dst.value_pointer.(*string).* = copy_string(src_string.*);
+          case .RESIZABLE;
+            array := dst.value_pointer.(*[..]u8);
+            array_add(array, ..src_string.(*[]u8).*);
+        }
+        return true;
+    }
     
     // TODO: I am unsure whether or not we should just do the conversion checks below separately from the switch to get src_data and src_elem_count...
     
