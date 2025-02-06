@@ -1026,6 +1026,15 @@ int_to_float :: (dst: Any, src: Any) {
 // it could be that right now we don't actually want to do this comparison, especially if all our trivial types like int and and float don't get stored by data packer and instead get specially encoded
 // LATER: the struct case may actually be much better to precheck if we have an array of structs, since we only have to do the type checking once and skip remapping each individual instance
 
+is_numeric_type :: inline (t: Type) -> bool {
+    ti := t.(*Type_Info);
+    return ti.type == .INTEGER || ti.type == .FLOAT;
+}
+
+is_numeric_type :: inline (ti: *Type_Info) -> bool {
+    return ti.type == .INTEGER || ti.type == .FLOAT;
+}
+
 // two types are considered equivalent if we can memcpy between the two types validly.
 are_types_equivalent :: (ti1: *Type_Info, ti2: *Type_Info) -> bool {
     if ti1.type != ti2.type  return false;
