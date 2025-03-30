@@ -513,32 +513,30 @@ add_debug_trace :: (format: string, args: ..Any) #expand {
 
 DEBUG :: false;
 
-// copied from how_to/170_modify.jai
-Dynamic_New :: (ti: *Type_Info, initialized := true) -> *void {
-    size := ti.runtime_size;
-    if size < 0 return null;   // Maybe they gave us a weird polymorphic type for some reason.
-
-    memory := alloc(size);
-
-    if initialized {
-        if ti.type == .STRUCT {
-            // Structs can have initializers. If the initializer is null, the struct is to be zeroed.
-            tis := ti.(*Type_Info_Struct);
-            if tis.initializer  tis.initializer(memory);
-            else                memset(memory, 0, size);
-        } else {
-            // Non-structs always default to 0.
-            // @Incomplete: Here we are not handling variants, or arrays of things that might have initializers.
-            memset(memory, 0, size);
-        }
-    }
-
-    return memory;
-}
-
 Dynamic_New_Any :: inline (ti: *Type_Info, initialized := true) -> Any {
     memory := Dynamic_New(ti, initialized);
     return ifx memory then Any.{ ti, memory } else Any.{};
+}
+
+Dynamic_New :: (type: *Type_Info, initialized := true) -> *void {
+    size := type.runtime_size;
+    if size < 0 return null;   // Maybe they gave us a weird polymorphic type for some reason.
+
+    memory := alloc(size);
+    if initialized  initialize_any(Any.{ type, memory });
+    return memory;
+}
+
+initialize_any :: (any: Any) {
+    if any.type.type == .STRUCT {
+        tis := any.type.(*Type_Info_Struct);
+        if tis.initializer  tis.initializer(any.value_pointer);
+        else                memset(any.value_pointer, 0, any.type.runtime_size);
+    } else {
+        // Non-structs always default to 0.
+        // @Incomplete: Here we are not handling variants, or arrays of things that might have initializers.
+        memset(any.value_pointer, 0, any.type.runtime_size);
+    }
 }
 
 array_reserve_nonpoly :: (array: *Resizable_Array, desired_items: s64, elem_size: s64) {

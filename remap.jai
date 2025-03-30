@@ -11,9 +11,6 @@ Conversion_Types :: enum_flags u64 {
     INT_TO_FLOAT;
     FLOAT_TO_INT;
     
-    // Maybe we just have a flag for enum_as_int? As this is really the only important cast that occurs
-    // I doubt that anyone would need to allow enum to int but not int to enum or vice versa
-    // ENUM_AS_INT;            // if allowed, we then follow the integer rules for the underlying type
     ENUM_TO_INT;
     INT_TO_ENUM;
     ENUM_TO_FLOAT;
@@ -52,13 +49,6 @@ Conversion_Types :: enum_flags u64 {
     REMAP_UNION;    // currently hardcoded as unsupported
     REMAP_THROUGH_POINTER;
     RECAST_POINTER;
-    
-    // composite values
-    // we can't differentiate these two...
-    // ENUM_TO_INT   :: INT_TO_INT   | ENUM_AS_INT;
-    // INT_TO_ENUM   :: INT_TO_INT   | ENUM_AS_INT;
-    // ENUM_TO_FLOAT :: INT_TO_FLOAT | ENUM_AS_INT;
-    // FLOAT_TO_ENUM :: FLOAT_TO_INT | ENUM_AS_INT;
     
     ALL :: 0xFFFF_FFFF_FFFF_FFFF;
 }
@@ -107,12 +97,12 @@ is_allowed :: inline (conversion_type: Conversion_Types) -> bool {
     return context.data_packer.conversion_settings.allowed_conversions & conversion_type == conversion_type;
 }
 
-log_disallowed_conversion :: inline (conversion: Conversion_Types, proc_name: string) {
-    log("Error: disallowed conversion % in %", conversion, proc_name);
+log_disallowed_conversion :: inline (conversion: Conversion_Types, proc_name: string, loc := #caller_location) {
+    log("Error: disallowed conversion % in % (line: %)", conversion, proc_name, loc.line_number);
 }
 
-log_unsupported_conversion :: inline (conversion: Conversion_Types, proc_name: string) {
-    log("Error: unsupported conversion % in %", conversion, proc_name);
+log_unsupported_conversion :: inline (conversion: Conversion_Types, proc_name: string, loc := #caller_location) {
+    log("Error: unsupported conversion % in % (line: %)", conversion, proc_name, loc.line_number);
 }
 
 default_conversion_settings := DEFAULT_CONVERSION_SETTINGS;
@@ -122,12 +112,18 @@ DEFAULT_CONVERSION_SETTINGS :: Conversion_Settings.{
 };
 
 
+// TODO: could improve slightly by making a version of remap_data which is bakeable on dst type.
+//       that way, we could remove the extra function calls and switch on dst type.
+remap_to :: inline ($T: Type, src: Any) -> (T, bool) {
+    result: T;
+    ok := remap_data(result, src);
+    return result, ok;
+}
+
 
 // The most general remapping procedure. 
 // Handles any dst and src types.
 remap_data :: (dst: Any, src: Any) -> bool {
-    settings := *context.data_packer.conversion_settings;
-    
     // for now we are not requiring that src subtype and dst subtype match up top
     // for the cases where this matters, we check those individually
     
@@ -224,8 +220,6 @@ remap_data :: (dst: Any, src: Any) -> bool {
 }
 
 remap_struct :: (dst: Any, src: Any) -> bool {
-    settings := *context.data_packer.conversion_settings;
-
     assert(src.type.type == .STRUCT);
     assert(dst.type.type == .STRUCT);
     
@@ -433,79 +427,101 @@ type_is_union :: (ti: *Type_Info) -> bool {
 // TODO: consider how allocators / allocations should work and what settings to implement
 // Shallow copy vs deep copy options?
 remap_array :: (dst: Any, src: Any) -> bool {
-    settings := *context.data_packer.conversion_settings;
-
+    /*
+        remap_array is probably the most complex remapping case, since we need to handle not only the three array types, 
+            but we also support remapping a single-element of a given type T to an array with element type T.
+        
+        Because of this, we need to pull out the type, value_pointer, and element_type from dst and src, 
+            and then manually override those in certain cases. 
+        So for the sake of keeping the code legible, dst and src should not be used directly at all beyond this header section.
+    */
+    
+    // NOTE: src does not necessarily have to be an array here
     assert(dst.type.type == .ARRAY);
-    // assert(src.type.type == .ARRAY); // src can sometimes be dst.element_type
     
-    _src := src; // so we can override in single to array case
+    src_type := src.type;
+    dst_type := dst.type.(*Type_Info_Array);
     
-    dst_ti :=  dst.type.(*Type_Info_Array);
-    src_ti := _src.type.(*Type_Info_Array);
+    src_value_pointer := src.value_pointer;
+    dst_value_pointer := dst.value_pointer;
     
-    // so we an override for 'array-of-one' case
-    // NOTE: it is important that we don't access the type info of the element type through _src or src_ti directly now, as this will be invalid in the 'single to array' case
-    src_elem_type  := src_ti.element_type; 
+    src_element_type: *Type_Info; // we figure this out later, once we can be sure src_type is an array
+    dst_element_type := dst_type.element_type;
     
     conversion_type: Conversion_Types = .UNKNOWN_CONVERSION;
     
-    
     // remap string to array of u8
-    // TODO: add checks on conversion rules for these cases
-    if src_ti.type == .STRING && dst_ti.element_type == type_info(u8) {
-        src_string := src.value_pointer.(*string);
-        if dst_ti.array_type == {
+    if src_type.type == .STRING {
+        if dst_type.element_type == type_info(u8) {
+            if dst_type.array_type == {
+              case .FIXED;       conversion_type = .STRING_TO_FIXED_ARRAY;
+              case .VIEW;        conversion_type = .STRING_TO_VIEW;
+              case .RESIZABLE;   conversion_type = .STRING_TO_RESIZABLE;
+            }
+        }
+        if !is_allowed(conversion_type) {
+            if conversion_type 
+                then log_disallowed_conversion (conversion_type, "remap_array");
+                else log_unsupported_conversion(conversion_type, "remap_array");
+            return false;
+        }
+        
+        src_string_pointer := src_value_pointer.(*string);
+        if dst_type.array_type == {
           case .FIXED;
-            memcpy(dst.value_pointer, src_string.data, src_string.count);
+            memcpy(dst_value_pointer, src_string_pointer.data, src_string_pointer.count);
           case .VIEW;
             // TODO: we would like to have an option as to whether this should copy
-            dst.value_pointer.(*string).* = copy_string(src_string.*);
+            dst_value_pointer.(*string).* = copy_string(src_string_pointer.*);
           case .RESIZABLE;
-            array := dst.value_pointer.(*[..]u8);
-            array_add(array, ..src_string.(*[]u8).*);
+            array := dst_value_pointer.(*[..]u8);
+            array_add(array, ..src_string_pointer.(*[]u8).*);
         }
         return true;
     }
     
     // TODO: I am unsure whether or not we should just do the conversion checks below separately from the switch to get src_data and src_elem_count...
     
-    // We use this as stack storage for backing array view in the case we have a SINGLE_TO_ARRAY conversion.
-    // In theory, it would be better to have an any with type info for a [1] T, but we can't really do that. We also now cannot rely on src_ti.element_type to be accurate
-    array_of_one: Array_View_64;
-    if _src.type.type != .ARRAY {
-        conversion_type = .SINGLE_TO_ARRAY;
-        array_of_one = .{ 1, _src.value_pointer };
-        src_elem_type = _src.type;
-        _src = array_of_one;
-        src_ti := type_info([] u8);
-    }
-    else { // array to array
-        if dst_ti.array_type == {
+    // now we determine src_element_type and conversion_type, as well as get src data and count
+    src_count: int   = ---;
+    src_data:  *void = ---;
+    
+    if src_type.type != .ARRAY {
+        conversion_type  = .SINGLE_TO_ARRAY;
+        src_element_type = src_type;
+        src_count        = 1;
+        src_data         = src_value_pointer;
+    } else {
+        src_element_type = src_type.(*Type_Info_Array).element_type;
+        src_array_type  := src_type.(*Type_Info_Array).array_type;
+        src_count, src_data = get_array_count_and_data(src_value_pointer, xx src_type);
+        
+        if dst_type.array_type == {
           case .FIXED;
-            if src_ti.array_type == {
-              case .FIXED     ; 
-                  // TODO: we should probably notify the user if array gets widened or truncated
-                if src_ti.array_count > dst_ti.array_count {
+            if src_array_type == {
+              case .FIXED; 
+                // TODO: we should probably notify the user if fixed array gets widened or truncated
+                if src_count > dst_type.array_count {
                     conversion_type = .TRUNCATE_FIXED_ARRAY;
-                } else if src_ti.array_count < dst_ti.array_count {
+                } else if src_count < dst_type.array_count {
                     conversion_type = .WIDEN_FIXED_ARRAY;
                 } else {
                     conversion_type = .NO_CONVERSION_REQUIRED;
                 }
-              case .VIEW      ; conversion_type = .VIEW_TO_FIXED_ARRAY;
-              case .RESIZABLE ; conversion_type = .VIEW_TO_FIXED_ARRAY;
+              case .VIEW;       conversion_type = .VIEW_TO_FIXED_ARRAY;
+              case .RESIZABLE;  conversion_type = .VIEW_TO_FIXED_ARRAY;
             }
           case .VIEW;
-            if dst_ti.array_type == {
-              case .FIXED     ; conversion_type = .FIXED_ARRAY_TO_VIEW;
-              case .VIEW      ; conversion_type = .NO_CONVERSION_REQUIRED;
-              case .RESIZABLE ; conversion_type = .RESIZABLE_ARRAY_TO_VIEW;
+            if dst_type.array_type == {
+              case .FIXED;      conversion_type = .FIXED_ARRAY_TO_VIEW;
+              case .VIEW;       conversion_type = .NO_CONVERSION_REQUIRED;
+              case .RESIZABLE;  conversion_type = .RESIZABLE_ARRAY_TO_VIEW;
             }
           case .RESIZABLE;
-            if dst_ti.array_type == {
-              case .FIXED     ; conversion_type = .FIXED_ARRAY_OR_VIEW_TO_RESIZABLE; 
-              case .VIEW      ; conversion_type = .FIXED_ARRAY_OR_VIEW_TO_RESIZABLE;
-              case .RESIZABLE ; conversion_type = .NO_CONVERSION_REQUIRED;
+            if dst_type.array_type == {
+              case .FIXED;      conversion_type = .FIXED_ARRAY_OR_VIEW_TO_RESIZABLE; 
+              case .VIEW;       conversion_type = .FIXED_ARRAY_OR_VIEW_TO_RESIZABLE;
+              case .RESIZABLE;  conversion_type = .NO_CONVERSION_REQUIRED;
             }
         }
     }
@@ -517,82 +533,70 @@ remap_array :: (dst: Any, src: Any) -> bool {
         return false;
     }
     
-    
-    src_data:       *void = ---;
-    src_elem_count: int   = ---;
-    
-    if src_ti.array_type == .FIXED {
-        src_data       = _src.value_pointer;
-        src_elem_count = src_ti.array_count;
-    } else {
-        raw_array := _src.value_pointer.(*Resizable_Array);
-        src_data       = raw_array.data;
-        src_elem_count = raw_array.count;
-    }
-    
-    if src_data == null || src_elem_count == 0  return true;
+    // if we have nothing to copy from src, then just return success
+    if src_data == null || src_count == 0  return true;
     
     
-    dst_data:       *void = ---;
-    dst_elem_count: int   = ---;
+    // we have to do a bit more work when getting dst data and count, 
+    // since we actaully want to allocate for the view and resizable cases
+    dst_count: int   = ---;
+    dst_data:  *void = ---;
     
-    if dst_ti.array_type == {
+    if dst_type.array_type == {
       case .FIXED;
-        dst_data       = dst.value_pointer;
-        dst_elem_count = dst_ti.array_count;
+        dst_data  = dst_value_pointer;
+        dst_count = dst_type.array_count;
         
       case .VIEW;
-        raw_array := dst.value_pointer.(*Array_View_64);
-        dst_data       = raw_array.data;
-        dst_elem_count = raw_array.count;
-        if dst_data == null {
-            assert(dst_elem_count == 0, "dst_elem_count was %", dst_elem_count);
-            // TODO: set allocators for array views' data
-            raw_array.data  = alloc(src_elem_count * dst_ti.element_type.runtime_size);
-            memset(raw_array.data, 0, src_elem_count * dst_ti.element_type.runtime_size);
-            raw_array.count = src_elem_count;
-            
-            dst_data       = raw_array.data;
-            dst_elem_count = raw_array.count;
+        raw_array := dst_value_pointer.(*Array_View_64);
+        
+        // NOTE: we only allocate new data for the array view if it is currently null, 
+        //       otherwise, we assume that user pre-allocated a set amount of space.
+        if raw_array.data == null {
+            assert(raw_array.count == 0, "dst_count was %", raw_array.count);
+            // TODO: give the user the ability to set allocators for array views' data
+            raw_array.count = src_count;
+            raw_array.data  = alloc(src_count * dst_type.element_type.runtime_size);
+            memset(raw_array.data, 0, src_count * dst_type.element_type.runtime_size);
         } else {
-            log("array view data was non-null: data %, count %", raw_array.data, raw_array.count);
+            log("Warning: array view data was non-null in : data %, count %", raw_array.data, raw_array.count);
         }
+        dst_count = raw_array.count;
+        dst_data  = raw_array.data;
         
       case .RESIZABLE;
-        // TODO: verify that cap is set properly ?
-        raw_array := dst.value_pointer.(*Resizable_Array);
-        array_reserve_nonpoly(xx raw_array, src_elem_count, dst_ti.element_type.runtime_size);
-        raw_array.count = src_elem_count;
-        dst_data        = raw_array.data;
-        dst_elem_count  = raw_array.count;
+        raw_array := dst_value_pointer.(*Resizable_Array);
+        
+        // TODO: should we only reserve space when resizable array is empty, like in .VIEW case above?
+        array_reserve_nonpoly(xx raw_array, src_count, dst_element_type.runtime_size);
+        assert(raw_array.allocated == src_count);
+        raw_array.count = src_count;
+        
+        dst_count = raw_array.count;
+        dst_data  = raw_array.data;
     }
     
-    if dst_data == null || dst_elem_count == 0 {
-        log("Error: array was null or empty");
+    if dst_data == null || dst_count == 0 {
+        log("Error: dst array was null or empty in remap_array.");
         print_stack_trace(context.stack_trace, to_standard_error = false);
         return false;
     }
     
     
-    min_count := min(dst_elem_count, src_elem_count);
+    // COPY ARRAY DATA
     
-    src_elem_any := Any.{ src_elem_type, src_data };
-    dst_elem_any := Any.{ dst_ti.element_type, dst_data };
-    
-    // TOOD: don't remap elements if they are of the same type! Just memcopy!
-    // problem: we can't ever just memcopy a struct or array since we are basically doing a deep copy, and also may remap thorugh pointers
-    // if are_types_equivalent(dst_ti.element_type, src_elem_type) {
-    //     memcpy(dst_data, src_data, src_elem_type.runtime_size * min_count);
-    // }
+    // TODO: probably log some warning when array counts don't match?
+    min_count    := min(src_count, dst_count);
+    src_element_any := Any.{ src_element_type, src_data };
+    dst_element_any := Any.{ dst_element_type, dst_data };
     
     for 0..min_count-1 {
-        // log("remapping array index %", it);
-        if !remap_data(dst_elem_any, src_elem_any) {
+        if !remap_data(dst_element_any, src_element_any) {
             log("Error: unable to remap data");
             return false;
         }
-        src_elem_any.value_pointer += src_elem_type.runtime_size;
-        dst_elem_any.value_pointer += dst_ti.element_type.runtime_size;
+        src_element_any.value_pointer += src_element_type.runtime_size;
+        dst_element_any.value_pointer += dst_element_type.runtime_size;
     }
     
     return true;
