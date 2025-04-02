@@ -268,7 +268,7 @@ remap_struct :: (dst: Any, src: Any) -> bool {
             // then we will fallback to trying to look for the members of the using'd member in the top level of src struct
             // this should allow the remapper to catch cases where you factor out some member into a another struct and then 'using' that new struct in the old struct 
             if dst_member.flags & .USING {
-                print("remapping src to using'd member % (%)\n", dst_member.name, type_info_to_type(dst_member.type));
+                print("remapping src to using'd member % (%)\n", dst_member.name, as_type(dst_member.type));
             
                 dst_member_any := Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes };
                 if !remap_data(dst_member_any, src)  {
@@ -280,7 +280,7 @@ remap_struct :: (dst: Any, src: Any) -> bool {
         }
         if src_member.flags & .CONSTANT  continue;
         
-        // print("remapping member % to % (%)\n", src_member.name, dst_member.name, type_info_to_type(dst_member.type));
+        // print("remapping member % to % (%)\n", src_member.name, dst_member.name, as_type(dst_member.type));
         
         dst_member_any := Any.{ dst_member.type, dst.value_pointer + dst_member.offset_in_bytes };
         src_member_any := Any.{ src_member.type, src.value_pointer + src_member.offset_in_bytes };
@@ -892,7 +892,6 @@ is_narrowing_int :: (dst_ti: *Type_Info_Integer, src_ti: *Type_Info_Integer) -> 
     } else {
         if dst_ti.signed && src_ti.runtime_size == dst_ti.runtime_size  return true;
     }
-    
     return false;
 }
 
@@ -918,33 +917,35 @@ int_to_int :: (dst: Any, src: Any) {
     // all other cases we can use s64 as an intermediate and then we don't have to do the combinatorics
     // still have to switch on signedness though...
     s64_value: s64;
-    if src.type.runtime_size == {
-      case 1;
-        if src_ti.signed then s64_value = src.value_pointer.(*s8 ).*.(s64);
-                         else s64_value = src.value_pointer.(*u8 ).*.(s64);
-      case 2;
-        if src_ti.signed then s64_value = src.value_pointer.(*s16).*.(s64);
-                         else s64_value = src.value_pointer.(*u16).*.(s64);
-      case 4;
-        if src_ti.signed then s64_value = src.value_pointer.(*s32).*.(s64);
-                         else s64_value = src.value_pointer.(*u32).*.(s64);
-      case 8;
-        if src_ti.signed then s64_value = src.value_pointer.(*s64).*.(s64);
-                         else s64_value = src.value_pointer.(*u64).*.(s64);
+    if src_ti.signed {
+        if src.type.runtime_size == {
+          case 1; s64_value = src.value_pointer.(*s8 ).*.(s64);
+          case 2; s64_value = src.value_pointer.(*s16).*.(s64);
+          case 4; s64_value = src.value_pointer.(*s32).*.(s64);
+          case 8; s64_value = src.value_pointer.(*s64).*.(s64);
+        }
+    } else {
+        if src.type.runtime_size == {
+          case 1; s64_value = src.value_pointer.(*u8 ).*.(s64);
+          case 2; s64_value = src.value_pointer.(*u16).*.(s64);
+          case 4; s64_value = src.value_pointer.(*u32).*.(s64);
+          case 8; s64_value = src.value_pointer.(*u64).*.(s64);
+        }
     }
-    if dst.type.runtime_size == {
-      case 1; 
-        if dst_ti.signed then dst.value_pointer.(*s8 ).* = s64_value.(s8 );
-                         else dst.value_pointer.(*u8 ).* = s64_value.(u8 );
-      case 2; 
-        if dst_ti.signed then dst.value_pointer.(*s16).* = s64_value.(s16);
-                         else dst.value_pointer.(*u16).* = s64_value.(u16);
-      case 4; 
-        if dst_ti.signed then dst.value_pointer.(*s32).* = s64_value.(s32);
-                         else dst.value_pointer.(*u32).* = s64_value.(u32);
-      case 8; 
-        if dst_ti.signed then dst.value_pointer.(*s64).* = s64_value.(s64);
-                         else dst.value_pointer.(*u64).* = s64_value.(u64);
+    if dst_ti.signed {
+        if dst.type.runtime_size == {
+          case 1; dst.value_pointer.(*s8 ).* = s64_value.(s8 );
+          case 2; dst.value_pointer.(*s16).* = s64_value.(s16);
+          case 4; dst.value_pointer.(*s32).* = s64_value.(s32);
+          case 8; dst.value_pointer.(*s64).* = s64_value.(s64);
+        }
+    } else {
+        if dst.type.runtime_size == {
+          case 1; dst.value_pointer.(*u8 ).* = s64_value.(u8 );
+          case 2; dst.value_pointer.(*u16).* = s64_value.(u16);
+          case 4; dst.value_pointer.(*u32).* = s64_value.(u32);
+          case 8; dst.value_pointer.(*u64).* = s64_value.(u64);
+        }
     }
 }
 
@@ -957,11 +958,20 @@ float_to_int :: (dst: Any, src: Any) {
         case 4; s64_value = src.value_pointer.(*float32).*.(s64);
         case 8; s64_value = src.value_pointer.(*float64).*.(s64);
     }
-    if dst.type.runtime_size == {
-        case 1; dst.value_pointer.(*s8 ).* = s64_value.(s8 );
-        case 2; dst.value_pointer.(*s16).* = s64_value.(s16);
-        case 4; dst.value_pointer.(*s32).* = s64_value.(s32);
-        case 8; dst.value_pointer.(*s64).* = s64_value.(s64);
+    if dst.type.(*Type_Info_Integer).signed {
+        if dst.type.runtime_size == {
+          case 1; dst.value_pointer.(*s8 ).* = s64_value.(s8 );
+          case 2; dst.value_pointer.(*s16).* = s64_value.(s16);
+          case 4; dst.value_pointer.(*s32).* = s64_value.(s32);
+          case 8; dst.value_pointer.(*s64).* = s64_value.(s64);
+        }
+    } else {
+        if dst.type.runtime_size == {
+          case 1; dst.value_pointer.(*u8 ).* = s64_value.(u8 );
+          case 2; dst.value_pointer.(*u16).* = s64_value.(u16);
+          case 4; dst.value_pointer.(*u32).* = s64_value.(u32);
+          case 8; dst.value_pointer.(*u64).* = s64_value.(u64);
+        }
     }
 }
 
@@ -1021,79 +1031,6 @@ int_to_float :: (dst: Any, src: Any) {
 }
 
 
-
-// ========== Helper Procs ==========
-
-// would it be good to cache the results of these type equivalence comparisons in the context of something like remap_data?
-// seems like it could actually end up taking us quite a lot of time to run the comparison that, perhaps we would just be faster just to do the normal remapping
-// this seems like the kind of thing where we would actually want to run some benchmarks, but that's not in scope for me right now...
-// it could be that right now we don't actually want to do this comparison, especially if all our trivial types like int and and float don't get stored by data packer and instead get specially encoded
-// LATER: the struct case may actually be much better to precheck if we have an array of structs, since we only have to do the type checking once and skip remapping each individual instance
-
-is_numeric_type :: inline (t: Type) -> bool {
-    ti := t.(*Type_Info);
-    return ti.type == .INTEGER || ti.type == .FLOAT;
-}
-
-is_numeric_type :: inline (ti: *Type_Info) -> bool {
-    return ti.type == .INTEGER || ti.type == .FLOAT;
-}
-
-// two types are considered equivalent if we can memcpy between the two types validly.
-are_types_equivalent :: (ti1: *Type_Info, ti2: *Type_Info) -> bool {
-    if ti1.type != ti2.type  return false;
-    if ti1.runtime_size != ti2.runtime_size  return false;
-    if ti1.type == {
-      case .STRUCT;
-        return are_structs_equivalent(xx ti1, xx ti2);
-        
-      case .ARRAY;
-        ti1_array := ti1.(*Type_Info_Array);
-        ti2_array := ti2.(*Type_Info_Array);
-        return ti1_array.array_type == ti2_array.array_type && are_types_equivalent(ti1_array.element_type, ti2_array.element_type);
-        
-      case .ENUM;
-        // on what criteria are two enums equivalent?
-        // based only on internal type?
-        // would we want to do a more structural check here?
-        ti1_enum := ti1.(*Type_Info_Enum);
-        ti2_enum := ti2.(*Type_Info_Enum);
-        return  ti1_enum.internal_type.signed == ti2_enum.internal_type.signed; 
-        
-      case .INTEGER;
-        ti1_integer := ti1.(*Type_Info_Integer);
-        ti2_integer := ti2.(*Type_Info_Integer);
-        return ti1_integer.signed == ti2_integer.signed; 
-        
-      case .FLOAT;
-        // we already checked that runtime size matches
-        return true; 
-    }
-}
-
-are_structs_equivalent :: (ti1: *Type_Info_Struct, ti2: *Type_Info_Struct) -> bool {
-    assert(ti1.type == .STRUCT);
-    assert(ti2.type == .STRUCT);
-    
-    if ti1.runtime_size  != ti2.runtime_size   return false;
-    if ti1.members.count != ti2.members.count  return false;
-    
-    // TODO: validate that all members have the exact same names and types
-    // TODO: ignore constant members and #place members
-    for ti1_member: ti1.members {
-        ti2_member := ti2.members[it_index];
-        if (ti1_member.flags & .CONSTANT) != (ti2_member.flags & .CONSTANT)  return false;
-        if !are_types_equivalent(ti1_member.type, ti2_member.type)  return false;
-    }
-    
-    return true;
-}
-
-
-
-
-
-
 /*
     For use in cases where a union's type is determined by some tag in the parent struct.
     
@@ -1120,8 +1057,7 @@ resolve_union_by_external_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src:
     assert(src_ti.type == .STRUCT);
     assert(src_ti.textual_flags & .UNION == .UNION);
     
-    dst_tag_s64: s64; // used as backing value for dst_tag_any, will be set in the remap_data call below
-    dst_tag_any := Any.{ xx user_data.tag_type, *dst_tag_s64 };
+    dst_tag_any := Small_Any.{ user_data.tag_type };
     
     src_tag_field := get_field(xx src.parent.type, user_data.tag_member_name);
     src_tag_any   := get_member_any(src.parent.value_pointer, src_tag_field);
@@ -1129,7 +1065,7 @@ resolve_union_by_external_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src:
     
     src_member_name: string;
     for user_data.lookup {
-        if it.tag_value == dst_tag_s64 {
+        if it.tag_value == dst_tag_s64.value_number {
             src_member_name = it.member_name;
             break;
         }
@@ -1171,10 +1107,16 @@ resolve_union_by_external_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src:
     }
     
     resolve_entity_union_data := Resolve_Union_By_Tag_Data.{ "type", type_info(Entity_Union), type_info(Entity_Type), .[
-        .{ xx Entity_Type.KNIGHT,  "knight" },
-        .{ xx Entity_Type.GOBLIN,  "goblin" },
+        .{ #run Number_Union.from(Entity_Type.KNIGHT),  "knight" },
+        .{ #run Number_Union.from(Entity_Type.GOBLIN),  "goblin" },
     ]};
     array_add(*context.data_packer.conversion_settings.get_union_type_procs, .{ resolve_union_by_tag, resolve_entity_union_data });
+    
+    
+    The need to use a #run on Number_Union.from() is less than ideal, but I have more confidence after switching 
+        to using the Number_Union that the code is correct and won't fail for enums with smaller backing integer sizes.
+    And the rest of this is also not really ideal anyhow, so I'm not gonna worry about making it 2% nicer 
+        until I figure out a way to make the 98% of union remapping less clunky and horrible.
 */
 resolve_union_by_internal_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src: Data_With_Context, data: *void) -> *Type_Info_Struct_Member {
     user_data := data.(*Resolve_Union_By_Tag_Data);
@@ -1186,8 +1128,7 @@ resolve_union_by_internal_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src:
     assert(src_ti.type == .STRUCT);
     assert(src_ti.textual_flags & .UNION == .UNION);
     
-    dst_tag_s64: s64; // used as backing value for dst_tag_any, will be set in the remap_data call below
-    dst_tag_any := Any.{ xx user_data.tag_type, *dst_tag_s64 };
+    dst_tag_any := Small_Any.{ user_data.tag_type };
     
     src_tag_field := get_field(xx src.data.type, user_data.tag_member_name);
     src_tag_any   := get_member_any(src.data.value_pointer, src_tag_field);
@@ -1195,7 +1136,7 @@ resolve_union_by_internal_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src:
     
     src_member_name: string;
     for user_data.lookup {
-        if it.tag_value == dst_tag_s64 {
+        if it.tag_value == dst_tag_any.value_number {
             src_member_name = it.member_name;
             break;
         }
@@ -1212,88 +1153,9 @@ resolve_union_by_internal_tag : Resolve_Union_Proc : (union_ti: *Type_Info, src:
     return null;
 }
 
-
 Resolve_Union_By_Tag_Data :: struct {
     tag_member_name:    string;
     tag_type:           *Type_Info_Enum;
     union_type:         *Type_Info;
-    lookup:             [] struct { tag_value: s64; member_name: string; };
-}
-
-get_member_any :: (parent: Any, member_name: string) -> Any {
-    assert(parent.type.type == .STRUCT);
-    
-    parent_ti := parent.type.(*Type_Info_Struct);
-    
-    member: *Type_Info_Struct_Member;
-    for *parent_ti.members {
-        if it.name == member_name {
-            member = it;
-            break;
-        }
-    }
-    if !member  return Any.{};
-    
-    return get_member_any(parent.value_pointer, member);
-}
-
-get_member_any :: (parent_ptr: *void, member_ti: *Type_Info_Struct_Member) -> Any {
-    if !member_ti  return Any.{};
-    value_pointer := parent_ptr + member_ti.offset_in_bytes;
-    return Any.{ member_ti.type, value_pointer };
-}
-
-
-
-
-
-#scope_module
-
-recast_type_info :: (any: Any) -> Any, bool {
-    if any.type == type_info(*Type_Info) {
-        ti := any.value_pointer.(**Type_Info).*;
-        if ti.type == {
-            case .INTEGER;      return Any.{ type_info(*Type_Info_Integer),   any.value_pointer }, true;
-            case .FLOAT;        return Any.{ type_info(*Type_Info_Float),     any.value_pointer }, true;
-            case .STRING;       return Any.{ type_info(*Type_Info_String),    any.value_pointer }, true;
-            case .POINTER;      return Any.{ type_info(*Type_Info_Pointer),   any.value_pointer }, true;
-            case .PROCEDURE;    return Any.{ type_info(*Type_Info_Procedure), any.value_pointer }, true;
-            case .STRUCT;       return Any.{ type_info(*Type_Info_Struct),    any.value_pointer }, true;
-            case .ARRAY;        return Any.{ type_info(*Type_Info_Array),     any.value_pointer }, true;
-            case .ENUM;         return Any.{ type_info(*Type_Info_Enum),      any.value_pointer }, true;
-            case .VARIANT;      return Any.{ type_info(*Type_Info_Variant),   any.value_pointer }, true;
-        }
-    }
-    return any, false;
-}
-
-deref_any_pointer :: (any: Any) -> Any, bool {
-    if any.type.type == .POINTER {
-        return Any.{
-            any.type.(*Type_Info_Pointer).pointer_to,
-            any.value_pointer.(**void).*
-        }, true;
-    }
-    return any, false;
-}
-
-// restores the value of a variable at this time upon scope exit
-defer_restore :: (value: $T) #expand {
-    value_before := value;
-    `defer value = value_before;
-}
-
-unwrap_variant_type :: (any: Any) -> Any {
-    if any.type.type == .VARIANT {
-        return Any.{
-            any.type.(*Type_Info_Variant).variant_of,
-            any.value_pointer
-        }, true;
-    }
-    return any, false;
-}
-
-// TODO: maybe move this to some utils file if we do keep it around
-type_info_to_type :: inline (ti: *Type_Info) -> Type {
-    return (*ti).(*Type).*;
+    lookup:             [] struct { tag_value: Number_Union; member_name: string; };
 }

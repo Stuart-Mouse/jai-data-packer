@@ -1,10 +1,3 @@
-#import "Basic";
-#import "File";
-#import "Reflection";
-#import "Hash_Table";
-
-#load "remap.jai";
-
 /*
     Data Packer
     
@@ -500,7 +493,22 @@ decode_local_data_pointer :: inline (ptr: *void) -> (ptr_data: u32, user_data: u
 }
 
 
-#if DEBUG  debug_trace: [..] string;
+#load "remap.jai";
+
+#scope_module
+
+#import "Basic";
+#import "File";
+#import "Reflection";
+using,except(next_power_of_two) Hash_Table :: #import "Hash_Table";
+
+#import "Utils";
+
+
+
+DEBUG :: false;
+
+#if DEBUG { debug_trace: [..] string; }
 
 add_debug_trace :: (format: string, args: ..Any) #expand {
     #if DEBUG {
@@ -508,45 +516,3 @@ add_debug_trace :: (format: string, args: ..Any) #expand {
         `defer pop(*debug_trace);
     }
 } @PrintLike
-
-#scope_module
-
-DEBUG :: false;
-
-Dynamic_New_Any :: inline (ti: *Type_Info, initialized := true) -> Any {
-    memory := Dynamic_New(ti, initialized);
-    return ifx memory then Any.{ ti, memory } else Any.{};
-}
-
-Dynamic_New :: (type: *Type_Info, initialized := true) -> *void {
-    size := type.runtime_size;
-    if size < 0 return null;   // Maybe they gave us a weird polymorphic type for some reason.
-
-    memory := alloc(size);
-    if initialized  initialize_any(Any.{ type, memory });
-    return memory;
-}
-
-initialize_any :: (any: Any) {
-    if any.type.type == .STRUCT {
-        tis := any.type.(*Type_Info_Struct);
-        if tis.initializer  tis.initializer(any.value_pointer);
-        else                memset(any.value_pointer, 0, any.type.runtime_size);
-    } else {
-        // Non-structs always default to 0.
-        // @Incomplete: Here we are not handling variants, or arrays of things that might have initializers.
-        memset(any.value_pointer, 0, any.type.runtime_size);
-    }
-}
-
-array_reserve_nonpoly :: (array: *Resizable_Array, desired_items: s64, elem_size: s64) {
-    if desired_items <= array.allocated return;
-    
-    if !array.allocator.proc  remember_allocators(array);
-    
-    array.data = realloc(array.data, desired_items * elem_size, array.allocated * elem_size,, array.allocator);
-    assert(array.data != null); // The program will die if we couldn't get memory. We can think about an alternative strategy, but it's hard to know what would be reasonable.
-    
-    array.allocated = desired_items;
-}
-
