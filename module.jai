@@ -506,6 +506,26 @@ using,except(next_power_of_two) Hash_Table :: #import "Hash_Table";
 
 
 
+recast_type_info :: (any: Any) -> Any, bool {
+    if any.type == type_info(*Type_Info) {
+        ti := any.value_pointer.(**Type_Info).*;
+        if ti.type == {
+            case .INTEGER;      return Any.{ type_info(*Type_Info_Integer),   any.value_pointer }, true;
+            case .FLOAT;        return Any.{ type_info(*Type_Info_Float),     any.value_pointer }, true;
+            case .STRING;       return Any.{ type_info(*Type_Info_String),    any.value_pointer }, true;
+            case .POINTER;      return Any.{ type_info(*Type_Info_Pointer),   any.value_pointer }, true;
+            case .PROCEDURE;    return Any.{ type_info(*Type_Info_Procedure), any.value_pointer }, true;
+            case .STRUCT;       return Any.{ type_info(*Type_Info_Struct),    any.value_pointer }, true;
+            case .ARRAY;        return Any.{ type_info(*Type_Info_Array),     any.value_pointer }, true;
+            case .ENUM;         return Any.{ type_info(*Type_Info_Enum),      any.value_pointer }, true;
+            case .VARIANT;      return Any.{ type_info(*Type_Info_Variant),   any.value_pointer }, true;
+        }
+    }
+    return any, false;
+}
+
+
+
 DEBUG :: false;
 
 #if DEBUG { debug_trace: [..] string; }

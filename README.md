@@ -7,6 +7,15 @@ There's really two parts to the functionality provided here, but they are both c
 1. packing and unpacking binary data
 2. remapping data from one type to another using runtime type info
 
+
+## Dependencies
+
+This module depends on my Utils module (sorry): https://github.com/Stuart-Mouse/jai-utils
+I use this Utils module for many functions which are common across my other modules.
+
+
+## Rambling
+
 The data packing process just involves recursively navigating a data structure and copying all data into a contiguous buffer.
 In the process, we also replace all pointers with integer offsets into this buffer.
 When unpacking the data, we just navigate the structures as before and remap the pointers appropriately.
@@ -21,8 +30,3 @@ And thanks to most of the real work being done for us, the implementation is pre
 
 Obviously, serializing and deserializing one's binary data in this fashion is mush slower than using handwritten procedures, but the intention here is to have a quick and dirty catchall solution to use during development.
 And I'm quite confident that it's still a much more efficient solution than using a textual format like JSON or (God forbid) XML.
-
-The basic data remapper currently only handles the most trivial cases of data changes (e.g. changing size/signedness of numeric types or size/type of an array), but I do plan to add some means of extending the remapper's capabilities in the near future.
-
-Only the initial basic implementation is done, but there will be changes and improvement to come.
-The full thing is just over 500 lines right now (representing only 3 main procedures and 6 internal helper procedures) with all the bare essential functionality, but I hope to keep it under 1000 lines even with the addition of future features.
