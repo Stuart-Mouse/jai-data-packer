@@ -914,6 +914,7 @@ int_to_int :: (dst: Any, src: Any) {
         return;
     }
     
+    
     // all other cases we can use s64 as an intermediate and then we don't have to do the combinatorics
     // still have to switch on signedness though...
     s64_value: s64;
@@ -932,6 +933,7 @@ int_to_int :: (dst: Any, src: Any) {
           case 8; s64_value = src.value_pointer.(*u64).*.(s64);
         }
     }
+    // TODO: Should we do something like range_check_and_store here so that we can manually catch and print attempted out-of-range conversions?
     if dst_ti.signed {
         if dst.type.runtime_size == {
           case 1; dst.value_pointer.(*s8 ).* = s64_value.(s8 );
