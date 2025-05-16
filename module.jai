@@ -498,6 +498,7 @@ decode_local_data_pointer :: inline (ptr: *void) -> (ptr_data: u32, user_data: u
 #scope_module
 
 #import "Basic";
+#import "Math";
 #import "File";
 #import "Reflection";
 using,except(next_power_of_two) Hash_Table :: #import "Hash_Table";

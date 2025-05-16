@@ -684,7 +684,7 @@ remap_enum :: (dst: Any, src: Any) -> bool {
 
 remap_int :: inline (dst: Any, src: Any) -> bool {
     settings := *context.data_packer.conversion_settings;
-
+    
     assert(dst.type.type == .INTEGER);
     
     if src.type.type == {
@@ -705,8 +705,7 @@ remap_int :: inline (dst: Any, src: Any) -> bool {
             log_disallowed_conversion(conversion, "remap_int");
             return false;
         }
-        int_to_int(dst, src);
-        return true;
+        return int_to_int(dst, src);
         
       case .FLOAT; 
         conversion := Conversion_Types.FLOAT_TO_INT;
@@ -895,60 +894,23 @@ is_narrowing_int :: (dst_ti: *Type_Info_Integer, src_ti: *Type_Info_Integer) -> 
     return false;
 }
 
-int_to_int :: (dst: Any, src: Any) {
+// returns false if cast result would be out-of-range for destination type, and clamping is not enabled
+int_to_int :: (dst: Any, src: Any, should_clamp := false) -> bool {
     assert(src.type.type == .INTEGER);
     assert(dst.type.type == .INTEGER);
     
     src_ti := src.type.(*Type_Info_Integer);
     dst_ti := dst.type.(*Type_Info_Integer);
     
-    // @IMPROVEMENT?: 
-    // I had considered just doing a memcpy for either 64 bit type, 
-    // but then we don't get range checking on u64 to s64.
-    // But maybe I am overlooking some way we can make this neater?
-    // Also, maybe we want to purposefully ignore the sign bit on u64 -> s64 because we use this proc for enums too?
-    
-    // if both are u64, then using s64 as an intermediate (as we do below) is problematic
-    if src_ti == type_info(u64) && dst_ti == type_info(u64) {
-        dst.value_pointer.(*u64).* = src.value_pointer.(*u64).*;
-        return;
+    // don't just compare type info pointers directly because we may be using external type infos
+    if src_ti.signed == dst_ti.signed && src_ti.runtime_size == dst_ti.runtime_size {
+        memcpy(dst.value_pointer, src.value_pointer, dst_ti.runtime_size);
+        return true;
     }
     
-    
-    // all other cases we can use s64 as an intermediate and then we don't have to do the combinatorics
-    // still have to switch on signedness though...
-    s64_value: s64;
-    if src_ti.signed {
-        if src.type.runtime_size == {
-          case 1; s64_value = src.value_pointer.(*s8 ).*.(s64);
-          case 2; s64_value = src.value_pointer.(*s16).*.(s64);
-          case 4; s64_value = src.value_pointer.(*s32).*.(s64);
-          case 8; s64_value = src.value_pointer.(*s64).*.(s64);
-        }
-    } else {
-        if src.type.runtime_size == {
-          case 1; s64_value = src.value_pointer.(*u8 ).*.(s64);
-          case 2; s64_value = src.value_pointer.(*u16).*.(s64);
-          case 4; s64_value = src.value_pointer.(*u32).*.(s64);
-          case 8; s64_value = src.value_pointer.(*u64).*.(s64);
-        }
-    }
-    // TODO: Should we do something like range_check_and_store here so that we can manually catch and print attempted out-of-range conversions?
-    if dst_ti.signed {
-        if dst.type.runtime_size == {
-          case 1; dst.value_pointer.(*s8 ).* = s64_value.(s8 );
-          case 2; dst.value_pointer.(*s16).* = s64_value.(s16);
-          case 4; dst.value_pointer.(*s32).* = s64_value.(s32);
-          case 8; dst.value_pointer.(*s64).* = s64_value.(s64);
-        }
-    } else {
-        if dst.type.runtime_size == {
-          case 1; dst.value_pointer.(*u8 ).* = s64_value.(u8 );
-          case 2; dst.value_pointer.(*u16).* = s64_value.(u16);
-          case 4; dst.value_pointer.(*u32).* = s64_value.(u32);
-          case 8; dst.value_pointer.(*u64).* = s64_value.(u64);
-        }
-    }
+    // we use u64 as intermediate and an extra boolean to represent that number is negative
+    u64_value, is_negative := int_to_abs_and_sign(src);
+    return range_check_and_store(dst, u64_value, is_negative, should_clamp);
 }
 
 float_to_int :: (dst: Any, src: Any) {
@@ -1017,6 +979,8 @@ float_to_float :: (dst: Any, src: Any) {
 int_to_float :: (dst: Any, src: Any) {
     assert(src.type.type == .INTEGER);
     assert(dst.type.type == .FLOAT);
+    
+    // TODO: provide some kind of range checking...
     
     f64_value: float64;
     if src.type.runtime_size == {
@@ -1161,3 +1125,112 @@ Resolve_Union_By_Tag_Data :: struct {
     union_type:         *Type_Info;
     lookup:             [] struct { tag_value: Number_Union; member_name: string; };
 }
+
+
+
+#scope_file
+
+// get absolute value of any int type, and a boolean representing whether the value was negative
+int_to_abs_and_sign :: (src: Any) -> (abs: u64, sign: bool) {
+    assert(src.type.type == .INTEGER);
+    info := src.type.(*Type_Info_Integer);
+    
+    u64_value: u64;
+    is_negative := false;
+    
+    if info.signed {
+        s64_value: s64;
+        if info.runtime_size == {
+          case 1; s64_value = xx src.value_pointer.(*s\8).*;
+          case 2; s64_value = xx src.value_pointer.(*s16).*;
+          case 4; s64_value = xx src.value_pointer.(*s32).*;
+          case 8; s64_value = xx src.value_pointer.(*s64).*;
+        }
+        is_negative = s64_value < 0;
+        u64_value = ifx is_negative 
+            then abs(s64_value + 1).(u64) + 1 // compensate for two's complement asymmetry
+            else s64_value.(u64);
+    } else {
+        if info.runtime_size == {
+          case 1; u64_value = xx src.value_pointer.(*u\8).*;
+          case 2; u64_value = xx src.value_pointer.(*u16).*;
+          case 4; u64_value = xx src.value_pointer.(*u32).*;
+          case 8; u64_value = xx src.value_pointer.(*u64).*;
+        }
+    }
+    
+    return u64_value, is_negative;
+}
+
+range_check_and_store :: (dst: Any, abs_value_u64: u64, is_negative: bool, should_clamp := false) -> bool {
+    assert(dst.type.type == .INTEGER);
+    info := dst.type.(*Type_Info_Integer);
+    
+    abs_min, max: u64;
+    if info.signed {
+        if info.runtime_size == {
+          case 1; abs_min, max = abs(S\8_MIN.(s64)+1).(u64)+1, xx S\8_MAX;
+          case 2; abs_min, max = abs(S16_MIN.(s64)+1).(u64)+1, xx S16_MAX;
+          case 4; abs_min, max = abs(S32_MIN.(s64)+1).(u64)+1, xx S32_MAX;
+          case 8; abs_min, max = abs(S64_MIN.(s64)+1).(u64)+1, xx S64_MAX;
+        }
+    } else {
+        if info.runtime_size == {
+          case 1; abs_min, max = 0, xx U\8_MAX;
+          case 2; abs_min, max = 0, xx U16_MAX;
+          case 4; abs_min, max = 0, xx U32_MAX;
+          case 8; abs_min, max = 0, xx U64_MAX;
+        }
+    }
+    assert(max != 0);
+    
+    if is_negative {
+        if abs_value_u64 > abs_min {
+            if should_clamp {
+                log_clamped_value_warning(-(abs_value_u64-1).(s64) - 1, info, min, max, min);
+                abs_value_u64 = abs_min;
+            } else {
+                log_range_error(-(abs_value_u64-1).(s64) - 1, info, 0, max, max);
+                return false;
+            }
+        }
+        if info.signed {
+            s64_value := -(abs_value_u64-1).(s64) - 1;
+            if info.runtime_size == {
+              case 1; dst.value_pointer.(*s\8).* = xx,no_check s64_value;
+              case 2; dst.value_pointer.(*s16).* = xx,no_check s64_value;
+              case 4; dst.value_pointer.(*s32).* = xx,no_check s64_value;
+              case 8; dst.value_pointer.(*s64).* = xx,no_check s64_value;
+            }
+        } else {
+            // We can just memset to 0 here as all unsigned values have a min of 0.
+            memset(dst.value_pointer, 0, info.runtime_size);
+        }
+    } else {
+        if abs_value_u64 > max.(u64) {
+            if should_clamp {
+                log_clamped_value_warning(abs_value_u64, info, min, max, max);
+                abs_value_u64 = max.(u64);
+            } else {
+                log_range_error(abs_value_u64, info, 0, max, max);
+                return false;
+            }
+        }
+        // We can just memcpy for all integer types here, since we already know the value is in range and is positive.
+        memcpy(dst.value_pointer, *abs_value_u64, info.runtime_size);
+    }
+    return true;
+}
+
+// Any is used for int values in below procs since types may vary and there's no reason to make this polymorphic.
+log_clamped_value_warning :: (value: Any, type: *Type_Info, min: Any, max: Any, clamped: Any) {
+    log("Warning: value of % cannot be assigned to type %. (Valid range is [% - %]) Clamping to % as a fallback.", value, as_type(type), min, max, clamped);
+}
+log_range_error :: (value: Any, type: *Type_Info, min: Any, max: Any, clamped: Any) {
+    log("Error: value of % cannot be assigned to type %. (Valid range is [% - %].)", value, as_type(type), min, max);
+}
+
+
+
+
+
