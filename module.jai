@@ -32,12 +32,18 @@
     TODO:
         1. provide some example for handling versioning
         2. finish implementing and provide example of local data pointers for .POINTER, .TYPE, and .PROCEDURE
-        2. write versions of remapping procedures that take Data_With_Context, so that user callbacks can be more useful
+        2. write versions of remapping procedures that take Any_With_Context, so that user callbacks can be more useful
         3. consider merging remapping and unpacking
             a. main reason being, we can better handle unpacking of unions and pointer recasting
-            b. will require using Data_With_Context for both unpacking and remapping procs
+            b. will require using Any_With_Context for both unpacking and remapping procs
     
-    
+    TODO: remove remap stuff and put into its own module
+          the two pieces of functionality are sufficiently separate that it just makes more sense to put them in differnet modules
+        
+        
+        
+    DEPENDENCIES: 
+        This module depends on my Utils module for the Any_With_Context struct 
 */
 
 // packs the given data and its type info and writes each to a separate file
@@ -105,7 +111,7 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
     if !ok  return false;
     
     
-    return remap_data(data, data_any);
+    return Convert.any_to_any(data, data_any);
 }
 
 
@@ -115,7 +121,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
     Pointer_And_Offset :: struct { pointer: *void; offset: s64; };
 
     recurse :: (
-        src:                Data_With_Context,
+        src:                Any_With_Context,
         buffer:             *[] u8, 
         write_offset:       s64, 
         packed_pointers:    *[..] Pointer_And_Offset
@@ -129,7 +135,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
             
             if ti_struct.textual_flags & .UNION {
                 member: *Type_Info_Struct_Member;
-                for context.data_packer.conversion_settings.get_union_type_procs {
+                for context.conversion_settings.get_union_type_procs {
                     member = it.proc(src.data.type, src, it.data);
                     if member  break;
                 }
@@ -222,7 +228,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
             // maybe recast pointer to more specific type
             ptr_any, done := recast_type_info(src.data);
             if !done {
-                for context.data_packer.conversion_settings.pointer_recast_procs {
+                for context.conversion_settings.pointer_recast_procs {
                     recast_ptr_any:, done = it.proc(.{ ptr_any, src.parent, src.struct_member_info }, it.data);
                     if done { ptr_any = recast_ptr_any; break; }
                 }
@@ -232,7 +238,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
             }
             
             // ENCODE LOCAL DATA POINTERS
-            // pack_local_ptr := context.data_packer.pack_local_data_pointer;
+            // pack_local_ptr := context.pack_local_data_pointer;
             // if pack_local_ptr != null {
             //     ptr_data, ok := pack_local_ptr(_data, parent, data_tism);
             //     if !ok {
@@ -361,9 +367,9 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                 packed_ptr := ptr_ptr.(**void).*;
                 
                 // if is_local_data_pointer(packed_ptr) {
-                //     unpack_local_ptr := context.data_packer.unpack_local_data_pointer;
+                //     unpack_local_ptr := context.unpack_local_data_pointer;
                 //     if unpack_local_ptr == null {
-                //         log("Error: encountered a local data pointer, but context.data_packer.unpack_local_data_pointer was null.");
+                //         log("Error: encountered a local data pointer, but context.unpack_local_data_pointer was null.");
                 //         return false;
                 //     }
                     
@@ -395,7 +401,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                 //       This should be fine, since your data file probably doesn't contain any pointers to type info, but if they do, note that this recast will not occur!
                 ptr_any, done := recast_type_info(Any.{ type, ptr_ptr });
                 if !done {
-                    for context.data_packer.conversion_settings.pointer_recast_procs {
+                    for context.conversion_settings.pointer_recast_procs {
                         recast_ptr_any:, done = it.proc(.{ ptr_any, null, null }, it.data);
                         if done { ptr_any = recast_ptr_any; break; }
                     }
@@ -427,17 +433,6 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
     return Any.{ type, buffer.data }, true;
 }
 
-/*
-    NOTE: This has absolutely nothing to do with the implicit context system.
-    Throughout the process of packing/unpacking/remapping data, we often want to know more about a piece of data than just the type.
-    So in addition to the Any for a piece of data, we pass around some additional contextual information.
-    We pass a Data_With_Context to the callback procedures for recasting pointers and resolving union types. 
-*/
-Data_With_Context :: struct {
-    data:                 Any;
-    parent:               Any;                        // if data is a struct member or array element, this points to the struct or array.
-    struct_member_info:   *Type_Info_Struct_Member;   // if data is a struct member, this is the info for that. may be null.
-}
 
 
 /*
@@ -456,7 +451,7 @@ Data_With_Context :: struct {
 // we give the callback the packed pointer and what it's a pointer to, and then the callback can figure out if it is able to resolve the pointer
 // this seems better than just using a blind lookup table, since we can consider the context of the type we are pointing to.
 // should be much easier for users to implement extended behaviour this way
-Pack\ _Local_Data_Pointer_Proc :: #type (ptr: Data_With_Context) -> (*void, bool);
+Pack\ _Local_Data_Pointer_Proc :: #type (ptr: Any_With_Context) -> (*void, bool);
 Unpack_Local_Data_Pointer_Proc :: #type (packed_ptr: *void, pointer_to: *Type_Info) -> (*void, bool);
 
 // when unpacking local data pointer, we will also want to override the type to match the internal ti, not whetever pointer_to says it is
@@ -493,19 +488,13 @@ decode_local_data_pointer :: inline (ptr: *void) -> (ptr_data: u32, user_data: u
 }
 
 
-#load "remap.jai";
 
 #scope_module
 
 #import "Basic";
-#import "Math";
-#import "File";
-#import "Reflection";
-using,except(next_power_of_two) Hash_Table :: #import "Hash_Table";
+#import "File";     // TODO: remove
 
-#import "Utils";
-
-
+using Convert :: #import "Convert";
 
 recast_type_info :: (any: Any) -> Any, bool {
     if any.type == type_info(*Type_Info) {
