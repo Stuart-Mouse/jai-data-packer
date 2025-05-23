@@ -10,8 +10,8 @@ There's really two parts to the functionality provided here, but they are both c
 
 ## Dependencies
 
-This module depends on my Utils module (sorry): https://github.com/Stuart-Mouse/jai-utils
-I use this Utils module for many functions which are common across my other modules.
+This module depends on my [Utils](https://github.com/Stuart-Mouse/jai-utils) and [Convert](https://github.com/Stuart-Mouse/jai-convert) modules.
+Sorry to make you go download more stuff, I really would prefer if I didn't need the dependencies, but it had become untennable to maintain all of the duplicated code across my modules.
 
 
 ## Rambling
