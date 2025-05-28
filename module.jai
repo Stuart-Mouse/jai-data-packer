@@ -106,12 +106,13 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
     log("%", dereference_any_pointer(info_any));
     
     // after unpacking type info in potentially old type info structure, remap to a new type info
-    if base_type_info != type_info(*Type_Info) {
-        // temporarily add custom remapping proc to context, then remove in defer
-        array_add(*context.conversion_settings.user_remap_procs, .{ convert_type_info, null });
-        defer context.conversion_settings.user_remap_procs.count -= 1;
+    if base_type_info != xx *Type_Info {
+        push_allocator(temp);
         
-        // log(print_type_info(info_any.value_pointer.(**Preload_0_2_012.Type_Info).*));
+        // temporarily add custom remapping proc to context, then remove in defer
+        callback_data: Convert_Type_Info_Callback_Data;
+        array_add(*context.conversion_settings.user_remap_procs, .{ convert_type_info, *callback_data });
+        defer context.conversion_settings.user_remap_procs.count -= 1;
         
         new_info: *Type_Info;
         if !Convert.any_to_any(new_info, info_any) {
@@ -124,8 +125,6 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
     }
     info := info_any.value_pointer.(**Type_Info).*;
     
-    // log(print_type_info(info));
-    
     data_file:, ok = read_entire_file(file_path);
     if !ok  return false;
     defer free(data_file);
@@ -137,11 +136,13 @@ unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, d
 }
 
 
+
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
 // TODO: use a dynamic array so that we don't have to actually realloc as often as we resize the buffer
+// TODO: could actually use a flat pool allocator, which would probably simplify code significantly (dont need buffer or write offset then)
 pack_data :: (data: Any, buffer: *[]u8) -> bool {
     Pointer_And_Offset :: struct { pointer: *void; offset: s64; };
-
+    
     recurse :: (
         src_ctx:            Any_With_Context,
         buffer:             *[] u8, 
@@ -151,41 +152,32 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
         // print("Writing % at offset %\n", (*data.type).(*Type).*, write_offset);
         src := src_ctx.any;
         
-        // TODO: .TYPE and .PROCEDURE can maybe be handled using special user callbacks
         if src.type.type == {
           case .STRUCT;
-            ti_struct := src.type.(*Type_Info_Struct);
+            struct_info := src.type.(*Type_Info_Struct);
             
-            if ti_struct.textual_flags & .UNION {
-                member: *Type_Info_Struct_Member;
+            if struct_info.textual_flags & .UNION {
+                union_member_info: *Type_Info_Struct_Member;
                 for context.conversion_settings.get_union_type_procs {
-                    member = it.proc(src.type, src_ctx, it.data);
-                    if member  break;
+                    union_member_info = it.proc(src.type, src_ctx, it.data);
+                    if union_member_info  break;
                 }
                 // If 'member' was not set, this is not necessarily treated as an error. Perhaps the union was just empty.
-                if member {
-                    assert(member.flags & .CONSTANT == 0);
-                    // log("Resolved union member for union of type % to %", (*src.type).(*Type).*, (*member.type).(*Type).*);
-                    member_any := Any.{ member.type, src.value_pointer + member.offset_in_bytes };
-                    if !recurse(.{ member_any, src, member }, buffer, write_offset + member.offset_in_bytes, packed_pointers) {
+                if union_member_info {
+                    assert(union_member_info.flags & .CONSTANT == 0);
+                    union_member := get_member(src, union_member_info);
+                    if !recurse(.{ union_member, src, union_member_info }, buffer, write_offset + union_member_info.offset_in_bytes, packed_pointers) {
                         return false;
                     }
                 }
             }
             
-            last_member_offset := -1;
-            for *member: ti_struct.members {
-                if member.flags & .CONSTANT  continue;
-                // ignoring #place members. Wish there were a better way to do this.
-                if member.offset_in_bytes < last_member_offset  break; 
-                last_member_offset = member.offset_in_bytes;
-                
-                add_debug_trace(".%", member.name);
-                member_any := Any.{ member.type, src.value_pointer + member.offset_in_bytes };
-                if !recurse(.{ member_any, src, member }, buffer, write_offset + member.offset_in_bytes, packed_pointers) {
+            iterate_struct_members(src, .SKIP_CONSTANT | .SKIP_PLACE, #code {
+                add_debug_trace(".%", it_info.name);
+                if !recurse(.{ it, src, it_info }, buffer, write_offset + it_info.offset_in_bytes, packed_pointers) {
                     return false;
                 }
-            }
+            });
             
           case .ARRAY;
             data_write_offset: s64   = ---;
@@ -332,19 +324,14 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
             // Or, theoretically, maybe we should do the remapping at the same time that we are unpacking the data?
             if ti_struct.textual_flags & .UNION  return true;
             
-            last_member_offset := -1;
-            for member: ti_struct.members {
-                if member.flags & .CONSTANT  continue;
-                // ignoring #place members. Wish there were a better way to do this.
-                if member.offset_in_bytes < last_member_offset  break; 
-                last_member_offset = member.offset_in_bytes;
-                
-                add_debug_trace(".%", member.name);
-                if !recurse(member.type, buffer, read_offset + member.offset_in_bytes, unpacked_offsets) {
+            struct_any := Any.{ type, *buffer[read_offset] };
+            iterate_struct_members(struct_any, .SKIP_CONSTANT | .SKIP_PLACE, #code {
+                add_debug_trace(".%", it_info.name);
+                if !recurse(it.type, buffer, read_offset + it_info.offset_in_bytes, unpacked_offsets) {
                     print("Error while unpacking data for struct member.\n");
                     return false;
                 }
-            }
+            });
             
           case .ARRAY;
             array_data:  s64 = ---;
@@ -359,7 +346,6 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                 if raw_array.data  == null  return true;
                 if raw_array.count == 0     return true;
                 
-                // assert(raw_array.data.(u64) >= 0 && raw_array.data.(u64) < buffer.count.(u64), "raw_array: %", raw_array.*);
                 if raw_array.data.(u64) < 0 || raw_array.data.(u64) >= buffer.count.(u64) {
                     print("Error while unpacking data for array.\n");
                     log("raw_array: %", raw_array.*);
@@ -524,190 +510,113 @@ decode_local_data_pointer :: inline (ptr: *void) -> (ptr_data: u32, user_data: u
 
 #import "Basic";
 #import "File";     // TODO: remove
-#import "Compiler";     // for is_subclass_of
+Compiler :: #import "Compiler";     // for is_subclass_of
 
 #import "Utils";
 using Convert :: #import "Convert";
 
 
 recast_type_info :: (any: Any) -> Any, bool {
-    if any.type == type_info(*Type_Info) {
+    if any.type == xx *Type_Info {
         ti := any.value_pointer.(**Type_Info).*;
         if ti.type == {
-            case .INTEGER;      return Any.{ type_info(*Type_Info_Integer),   any.value_pointer }, true;
-            case .FLOAT;        return Any.{ type_info(*Type_Info_Float),     any.value_pointer }, true;
-            case .STRING;       return Any.{ type_info(*Type_Info_String),    any.value_pointer }, true;
-            case .POINTER;      return Any.{ type_info(*Type_Info_Pointer),   any.value_pointer }, true;
-            case .PROCEDURE;    return Any.{ type_info(*Type_Info_Procedure), any.value_pointer }, true;
-            case .STRUCT;       return Any.{ type_info(*Type_Info_Struct),    any.value_pointer }, true;
-            case .ARRAY;        return Any.{ type_info(*Type_Info_Array),     any.value_pointer }, true;
-            case .ENUM;         return Any.{ type_info(*Type_Info_Enum),      any.value_pointer }, true;
-            case .VARIANT;      return Any.{ type_info(*Type_Info_Variant),   any.value_pointer }, true;
+            case .INTEGER;      return Any.{ xx *Type_Info_Integer,   any.value_pointer }, true;
+            case .FLOAT;        return Any.{ xx *Type_Info_Float,     any.value_pointer }, true;
+            case .STRING;       return Any.{ xx *Type_Info_String,    any.value_pointer }, true;
+            case .POINTER;      return Any.{ xx *Type_Info_Pointer,   any.value_pointer }, true;
+            case .PROCEDURE;    return Any.{ xx *Type_Info_Procedure, any.value_pointer }, true;
+            case .STRUCT;       return Any.{ xx *Type_Info_Struct,    any.value_pointer }, true;
+            case .ARRAY;        return Any.{ xx *Type_Info_Array,     any.value_pointer }, true;
+            case .ENUM;         return Any.{ xx *Type_Info_Enum,      any.value_pointer }, true;
+            case .VARIANT;      return Any.{ xx *Type_Info_Variant,   any.value_pointer }, true;
         }
     }
     
     // @Hack duplicated above logic for previous preload version. 
     // Don't want to have to do this for every previous version of type info, so need to think of a better solution.
     // We should probably just implement some proc that adapts old type info binaries into the new format...
-    if any.type == type_info(*Preload_0_2_012.Type_Info) {
-        ti := any.value_pointer.(**Preload_0_2_012.Type_Info).*;
-        if ti.type == {
-            case .INTEGER;      return Any.{ type_info(*Preload_0_2_012.Type_Info_Integer),   any.value_pointer }, true;
-            case .FLOAT;        return Any.{ type_info(*Preload_0_2_012.Type_Info_Float),     any.value_pointer }, true;
-            case .STRING;       return Any.{ type_info(*Preload_0_2_012.Type_Info_String),    any.value_pointer }, true;
-            case .POINTER;      return Any.{ type_info(*Preload_0_2_012.Type_Info_Pointer),   any.value_pointer }, true;
-            case .PROCEDURE;    return Any.{ type_info(*Preload_0_2_012.Type_Info_Procedure), any.value_pointer }, true;
-            case .STRUCT;       return Any.{ type_info(*Preload_0_2_012.Type_Info_Struct),    any.value_pointer }, true;
-            case .ARRAY;        return Any.{ type_info(*Preload_0_2_012.Type_Info_Array),     any.value_pointer }, true;
-            case .ENUM;         return Any.{ type_info(*Preload_0_2_012.Type_Info_Enum),      any.value_pointer }, true;
-            case .VARIANT;      return Any.{ type_info(*Preload_0_2_012.Type_Info_Variant),   any.value_pointer }, true;
+    {
+        using Preload_0_2_012;
+        if any.type == xx *Type_Info {
+            ti := any.value_pointer.(**Type_Info).*;
+            if ti.type == {
+                case .INTEGER;      return Any.{ xx *Type_Info_Integer,   any.value_pointer }, true;
+                case .FLOAT;        return Any.{ xx *Type_Info_Float,     any.value_pointer }, true;
+                case .STRING;       return Any.{ xx *Type_Info_String,    any.value_pointer }, true;
+                case .POINTER;      return Any.{ xx *Type_Info_Pointer,   any.value_pointer }, true;
+                case .PROCEDURE;    return Any.{ xx *Type_Info_Procedure, any.value_pointer }, true;
+                case .STRUCT;       return Any.{ xx *Type_Info_Struct,    any.value_pointer }, true;
+                case .ARRAY;        return Any.{ xx *Type_Info_Array,     any.value_pointer }, true;
+                case .ENUM;         return Any.{ xx *Type_Info_Enum,      any.value_pointer }, true;
+                case .VARIANT;      return Any.{ xx *Type_Info_Variant,   any.value_pointer }, true;
+            }
         }
     }
     
     return any, false;
 }
 
+Convert_Type_Info_Callback_Data :: struct {
+    source_jai_version:     Compiler.Version_Info;
+    generated_type_infos:   [..] struct {
+        old_ptr:    *void;  
+        new_ptr:    *Type_Info;
+    };
+}
+
 // TODO: figure out how to make allocations better here. going to just push temporary allocator in caller for now so that we don't have to worry about freeing the type info structure we create, since that could get ugly...
 convert_type_info :Convert.User_Remap_Proc: (new_info_ptr: Any, old_info_ptr: Any, user_data: *void) -> User_Remap_Proc_Result {
-    if new_info_ptr.type != type_info(*Type_Info)  return .UNHANDLED;
+    if new_info_ptr.type != xx *Type_Info then return .UNHANDLED;
+    
+    using _user_data := user_data.(*Convert_Type_Info_Callback_Data);
     
     // for now, we will presume that the very basic Type_Info struct in Preload.jai will never change, and we can always access the type tag.
     type_info_tag := old_info_ptr.value_pointer.(**Type_Info).*.type;
     
-    // the type info of the actual type info we want to create
+    // the type info of the type info we want to create
     info_type: *Type_Info;
     if type_info_tag == {
-      case .INTEGER;               info_type = type_info(Type_Info_Integer);
-      case .FLOAT;                 info_type = type_info(Type_Info_Float);
-      case .STRING;                info_type = type_info(Type_Info_String);
-      case .POINTER;               info_type = type_info(Type_Info_Pointer);
-      case .PROCEDURE;             info_type = type_info(Type_Info_Procedure);
-      case .STRUCT;                info_type = type_info(Type_Info_Struct);
-      case .ARRAY;                 info_type = type_info(Type_Info_Array);
-      case .ENUM;                  info_type = type_info(Type_Info_Enum);
-      case .VARIANT;               info_type = type_info(Type_Info_Variant);
+      case .INTEGER;               info_type = xx Type_Info_Integer;
+      case .FLOAT;                 info_type = xx Type_Info_Float;
+      case .STRING;                info_type = xx Type_Info_String;
+      case .POINTER;               info_type = xx Type_Info_Pointer;
+      case .PROCEDURE;             info_type = xx Type_Info_Procedure;
+      case .ARRAY;                 info_type = xx Type_Info_Array;
+      case .ENUM;                  info_type = xx Type_Info_Enum;
+      case .VARIANT;               info_type = xx Type_Info_Variant;
+      case .STRUCT;                info_type = xx Type_Info_Struct;
       case;
         return .UNHANDLED;
         // TODO: do we need a shallow copy here?
     }
     assert(info_type != null, "invalid type info tag: %", type_info_tag);
     
+    // check if we've already converted this type info
+    found := array_find_where(
+        generated_type_infos, 
+        (it, old_info_ptr) => it.old_ptr == old_info_ptr, 
+        old_info_ptr.value_pointer.(**Type_Info).*
+    );
+    if found {
+        new_info_ptr.value_pointer.(**Type_Info).* = found.new_ptr;
+        return .HANDLED;
+    }
+    
     // dynamically create a new type info structure for the proper type info subtype
     // then assign the pointer to that type info back to new_info_ptr
-    // TODO: only create a new type info if we haven't already. need some array or table to track this...
     new_info := New_Any(info_type);
     new_info_ptr.value_pointer.(**Type_Info).* = new_info.value_pointer.(*Type_Info);
+    
+    array_add(*generated_type_infos, .{
+        old_info_ptr.value_pointer.(**Type_Info).*,
+        new_info_ptr.value_pointer.(**Type_Info).*
+    });
     
     _old_info_ptr := recast_type_info(old_info_ptr); 
     old_info := dereference_any_pointer(_old_info_ptr);
     
     ok := Convert.any_to_any(new_info, old_info);
     return ifx ok then .HANDLED else .ERROR;
-}
-
-
-print_type_info :: (builder: *String_Builder, info: *Type_Info, indent := 0) {
-    INDENTATION_STRING :: "    ";
-    for 0..indent-1  append(builder, INDENTATION_STRING);
-    
-    if info.type == {
-      case;
-        print(builder, "%", as_type(info));
-        
-      case .POINTER;
-        pointer_info := info.(*Type_Info_Pointer);
-        print(builder, "%", as_type(info));
-        if is_subclass_of(pointer_info.pointer_to, "Type_Info") {
-            print_type_info(builder, pointer_info.pointer_to, indent + 1);
-        }
-        
-      case .STRUCT;
-        struct_info := info.(*Type_Info_Struct);
-        print(builder, "STRUCT '%'", struct_info.name);
-        print(builder, "members.count: %", struct_info.members.count);
-        for *struct_info.members {
-            print_type_info_struct_member(builder, it, indent + 1);
-        }
-        
-      case .ARRAY;
-        array_info := info.(*Type_Info_Array);
-        print(builder, "ARRAY (%)", array_info.array_type);
-        print_type_info(builder, array_info.element_type, indent + 1);
-        
-      // case .VARIANT;
-      //   variant_info := info.(*Type_Info_Variant);
-        
-    }
-}
-
-print_type_info :: (info: *Type_Info) -> string {
-    builder: String_Builder;
-    print_type_info(*builder, info);
-    return builder_to_string(*builder);
-}
-
-print_type_info_struct_member :: (builder: *String_Builder, info: *Type_Info_Struct_Member, indent := 0) {
-    INDENTATION_STRING :: "    ";
-    for 0..indent-1  append(builder, INDENTATION_STRING);
-    print(builder, "STRUCT MEMBER '%' @ offset %", info.name, info.offset_in_bytes);
-    
-    for 0..indent-1  append(builder, INDENTATION_STRING);
-    append(builder, "type:\n");
-    
-    print_type_info(builder, info.type, indent + 1);
-}
-
-
-
-print_type_info :: (builder: *String_Builder, info: *Preload_0_2_012.Type_Info, indent := 0) {
-    INDENTATION_STRING :: "    ";
-    for 0..indent-1  append(builder, INDENTATION_STRING);
-    
-    if info.type == {
-      case;
-        print(builder, "%", as_type(xx info));
-        
-      case .POINTER;
-        pointer_info := info.(*Preload_0_2_012.Type_Info_Pointer);
-        print(builder, "%", as_type(xx info));
-        if is_subclass_of(xx pointer_info.pointer_to, "Type_Info") {
-            print_type_info(builder, pointer_info.pointer_to, indent + 1);
-        }
-        
-      case .STRUCT;
-        struct_info := info.(*Preload_0_2_012.Type_Info_Struct);
-        print(builder, "STRUCT '%'", struct_info.name);
-        print(builder, "members.count: %", struct_info.members.count);
-        for *struct_info.members {
-            print_type_info_struct_member(builder, it, indent + 1);
-        }
-        
-      case .ARRAY;
-        array_info := info.(*Preload_0_2_012.Type_Info_Array);
-        print(builder, "ARRAY (%)", array_info.array_type);
-        print_type_info(builder, array_info.element_type, indent + 1);
-        
-      // case .VARIANT;
-      //   variant_info := info.(*Type_Info_Variant);
-        
-    }
-}
-
-print_type_info :: (info: *Preload_0_2_012.Type_Info) -> string {
-    builder: String_Builder;
-    print_type_info(*builder, info);
-    return builder_to_string(*builder);
-}
-
-print_type_info_struct_member :: (builder: *String_Builder, info: *Preload_0_2_012.Type_Info_Struct_Member, indent := 0) {
-    INDENTATION_STRING :: "    ";
-    for 0..indent-1  append(builder, INDENTATION_STRING);
-    print(builder, "STRUCT MEMBER '%' @ offset %", info.name, info.offset_in_bytes);
-    
-    for 0..indent-1  append(builder, INDENTATION_STRING);
-    append(builder, "type:\n");
-    
-    print_type_info(builder, info.type, indent + 1);
 }
 
 
@@ -722,19 +631,4 @@ add_debug_trace :: (format: string, args: ..Any) #expand {
         `defer pop(*debug_trace);
     }
 } @PrintLike
-
-/*
-    This is used as a sort of working storage for type info structures that we generate dynamically. 
-    This should probably be stored on the context so that there's not some sort of threading issues, but I havne't gotten that far yet TBH.
-    Actually, we can probabyl just put this on the stack and pass this to the callback with some data pointer
-    
-    Right now this is only used for type infos we generate in convert_type_info,
-    and the 'id' represents the pointer to the old format type info for which the new type info was created.
-*/
-generated_type_infos: [..] struct {
-    id:       *void;  
-    pointer:  *Type_Info;
-};
-
-
 
