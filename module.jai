@@ -56,20 +56,15 @@
 
 
 // packs the given data and its type info and writes each to a separate file
-pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data: Any) -> bool {
+pack_file_with_type_info :: (file_path: string, type_info_file_path: string, data: Any) -> bool {
     {
         buffer: [] u8;
         defer array_free(buffer);
         
-        ok := pack_data(data.type, *buffer);
-        if !ok {
-            log("Failed to pack type info!\n");
-            return false;
-        }
+        if !pack_type_info_with_header(data.type, *buffer)  return false;
         
-        ok = write_entire_file(type_info_file_path, buffer.(string));
-        if !ok {
-            log("Failed to write type info to file!\n");
+        if !write_entire_file(type_info_file_path, buffer.(string)) {
+            log("Failed to write type info to file!");
             return false;
         }
     }
@@ -78,15 +73,13 @@ pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data
         buffer: [] u8;
         defer array_free(buffer);
         
-        ok := pack_data(data, *buffer);
-        if !ok {
-            log("Failed to pack data!\n");
+        if !pack_data(data, *buffer) {
+            log("Failed to pack data!");
             return false;
         }
         
-        ok = write_entire_file(file_path, buffer.(string));
-        if !ok {
-            log("Failed to write data to file!\n");
+        if !write_entire_file(file_path, buffer.(string)) {
+            log("Failed to write data to file!");
             return false;
         }
     }
@@ -94,42 +87,19 @@ pack_file_and_type_info :: (file_path: string, type_info_file_path: string, data
     return true;
 }
 
+// TODO: pass the type info to use for unpacking instead of the path to the typ einfo file
+//       because we cannot assume anymore that type infos will be stored in the exact same binary format
+
+// we will add some function to load type info binaries which contain a jai version in some header
+// then we can probably make that module scope so we are free to improve the implementation of that part over time
+
 // assumes that the given file @ type_info_file_path actually contains data that was serialized from a *Type_Info.
-unpack_file_with_type_info :: (file_path: string, type_info_file_path: string, data: Any, base_type_info := type_info(*Type_Info)) -> bool {
-    type_info_file, ok := read_entire_file(type_info_file_path);
-    if !ok  return false;
-    defer free(type_info_file);
-    
-    info_any:, ok = unpack_data(base_type_info, (*type_info_file).(*[]u8));
-    if !ok  return false;
-    
-    log("%", dereference_any_pointer(info_any));
-    
-    // after unpacking type info in potentially old type info structure, remap to a new type info
-    if base_type_info != xx *Type_Info {
-        push_allocator(temp);
-        
-        // temporarily add custom remapping proc to context, then remove in defer
-        callback_data: Convert_Type_Info_Callback_Data;
-        array_add(*context.conversion_settings.user_remap_procs, .{ convert_type_info, *callback_data });
-        defer context.conversion_settings.user_remap_procs.count -= 1;
-        
-        new_info: *Type_Info;
-        if !Convert.any_to_any(new_info, info_any) {
-            log("Unable to remap old type info to new type info.");
-            return false;
-        }
-        info_any = new_info;
-        
-        // TODO: we should use some deep compare proc to validate that our type infos were converted correctly
-    }
-    info := info_any.value_pointer.(**Type_Info).*;
-    
-    data_file:, ok = read_entire_file(file_path);
+unpack_file_with_type_info :: (file_path: string, info: *Type_Info, data: Any) -> bool {
+    data_file, ok := read_entire_file(file_path);
     if !ok  return false;
     defer free(data_file);
     
-    file_data:, ok = unpack_data(info, (*data_file).(*[]u8));
+    file_data:, ok = unpack_data(info, xx *data_file);
     if !ok  return false;
     
     return Convert.any_to_any(data, file_data);
@@ -294,7 +264,7 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
     #if DEBUG  array_reset_keeping_memory(*debug_trace);
     add_debug_trace("DATA");
     
-    array_resize(buffer, data.type.runtime_size);
+    array_resize(buffer, buffer.count + data.type.runtime_size);
     if !recurse(.{ any = data }, buffer, 0, *packed_pointers) {
         return false;
     }
@@ -507,6 +477,7 @@ decode_local_data_pointer :: inline (ptr: *void) -> (ptr_data: u32, user_data: u
 #scope_module
 
 #load "old_preload_versions.jai";
+#load "type_info.jai";
 
 #import "Basic";
 #import "File";     // TODO: remove
@@ -532,7 +503,7 @@ recast_type_info :: (any: Any) -> Any, bool {
         }
     }
     
-    // @Hack duplicated above logic for previous preload version. 
+    // @Hack duplicated above logic for previous preload version
     // Don't want to have to do this for every previous version of type info, so need to think of a better solution.
     // We should probably just implement some proc that adapts old type info binaries into the new format...
     {
