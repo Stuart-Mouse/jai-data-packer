@@ -87,13 +87,7 @@ pack_file_with_type_info :: (file_path: string, type_info_file_path: string, dat
     return true;
 }
 
-// TODO: pass the type info to use for unpacking instead of the path to the typ einfo file
-//       because we cannot assume anymore that type infos will be stored in the exact same binary format
 
-// we will add some function to load type info binaries which contain a jai version in some header
-// then we can probably make that module scope so we are free to improve the implementation of that part over time
-
-// assumes that the given file @ type_info_file_path actually contains data that was serialized from a *Type_Info.
 unpack_file_with_type_info :: (file_path: string, info: *Type_Info, data: Any) -> bool {
     data_file, ok := read_entire_file(file_path);
     if !ok  return false;
