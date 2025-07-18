@@ -7,6 +7,8 @@ There's really two parts to the functionality provided here, but they are both c
 1. packing and unpacking binary data
 2. remapping data from one type to another using runtime type info
 
+(The second part of this has now been moved into its own module, `jai-convert`.)
+
 
 ## Dependencies
 
@@ -23,10 +25,10 @@ When unpacking the data, we just navigate the structures as before and remap the
 The data remapping process involves matching struct field names and converting data between compatible types.
 Again, this process is done recursively on the provided data structures.
 
-Putting these two things together, we can serialize or deserialize and data we want provided a Type_Info structure to guide the process, and the remapping will handle any trivial changes in the binary data format.
+Putting these two things together, we can serialize or deserialize any data we want, provided a Type_Info structure to guide the process, and the remapping will handle any trivial changes in the binary data format.
 
 If you're familiar with Protobuffs, this is kind of like that, but built specifically for Jai's type system.
 And thanks to most of the real work being done for us, the implementation is pretty simple.
 
 Obviously, serializing and deserializing one's binary data in this fashion is mush slower than using handwritten procedures, but the intention here is to have a quick and dirty catchall solution to use during development.
-And I'm quite confident that it's still a much more efficient solution than using a textual format like JSON or (God forbid) XML.
+And I'm quite confident that it's still a much more efficient solution than using a textual format like JSON or XML.
