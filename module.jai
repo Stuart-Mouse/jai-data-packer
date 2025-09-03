@@ -116,6 +116,10 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
         // print("Writing % at offset %\n", (*data.type).(*Type).*, write_offset);
         src := src_ctx.any;
         
+        while src.type.type == .VARIANT {
+            src.type = src.type.(*Type_Info_Variant).variant_of;
+        }
+        
         if src.type.type == {
           case .STRUCT;
             struct_info := src.type.(*Type_Info_Struct);
@@ -277,6 +281,10 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
         unpacked_offsets:   *[..] s64
     ) -> bool {
         // print("Unpacking data of type % at offset %\n", recast_type_info(Any.{ type, *buffer[read_offset] }), offset);
+        
+        while type.type == .VARIANT {
+            type = type.(*Type_Info_Variant).variant_of;
+        }
         
         if type.type == {
           case .STRUCT;
