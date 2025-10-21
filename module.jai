@@ -49,7 +49,7 @@
         
     REFACTORING TODO:
         create a proper data packer structure that we can use as a sort of context, need to pass fewer parameters as we recurse
-        replace Any_With_Context with a more robust Data_Trace_Node system
+        replace Any_With_Context with a more robust Data_Node system
         allow data packer to handle multiple calls to pack_data, create a directory of top-level data
             this will require some sort of external type table we can index to
 */
@@ -61,8 +61,6 @@ Pointer_And_Offset :: struct { pointer: *void; offset: s64; };
 Data_Packer :: struct {
     buffer:             [..] u8;
     packed_pointers:    [..] Pointer_And_Offset;
-    data_trace_node:    *Data_Trace_Node;
-    
     // TODO: callbacks for recasting pointers and other context settings
 }
 
@@ -119,7 +117,6 @@ pack_file_with_type_info :: (file_path: string, type_info_file_path: string, dat
     return true;
 }
 
-
 unpack_file_with_type_info :: (file_path: string, info: *Type_Info, data: Any) -> bool {
     data_file, ok := read_entire_file(file_path);
     if !ok  return false;
@@ -132,19 +129,18 @@ unpack_file_with_type_info :: (file_path: string, info: *Type_Info, data: Any) -
 }
 
 
-
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
 // TODO: use a dynamic array so that we don't have to actually realloc as often as we resize the buffer
 // TODO: could actually use a flat pool allocator, which would probably simplify code significantly (dont need buffer or write offset then)
 //       cannot use flat pool on the web though, so that doesn't help me much at the moment
-pack_data :: (packer: *Data_Packer, any: Any) -> bool {
+pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
     recurse :: (
-        packer:             *Data_Packer,
-        src_ctx:            Any_With_Context,
-        write_offset:       s64
+        packer:        *Data_Packer,
+        data_node:     *Data_Node,
+        write_offset:  s64
     ) -> bool {
         // print("Writing % at offset %\n", (*data.type).(*Type).*, write_offset);
-        src := src_ctx.any;
+        src := data_node.any;
         
         while src.type.type == .VARIANT {
             src.type = src.type.(*Type_Info_Variant).variant_of;
@@ -167,22 +163,23 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool {
             if struct_info.textual_flags & .UNION {
                 union_member_info: *Type_Info_Struct_Member;
                 for context.conversion_settings.get_union_type_procs {
-                    union_member_info = it.proc(src.type, src_ctx, it.data);
+                    union_member_info = it.proc(src.type, data_node, it.data);
                     if union_member_info  break;
                 }
                 // If 'member' was not set, this is not necessarily treated as an error. Perhaps the union was just empty.
                 if union_member_info {
                     assert(union_member_info.flags & .CONSTANT == 0);
                     union_member := get_member(src, union_member_info);
-                    if !recurse(packer, .{ union_member, src, union_member_info }, write_offset + union_member_info.offset_in_bytes) {
+                    member_data_node := Data_Node.{ kind = .STRUCT_MEMBER, member_info = union_member_info, any = union_member, parent = data_node };
+                    if !recurse(packer, *member_data_node, write_offset + union_member_info.offset_in_bytes) {
                         return false;
                     }
                 }
             }
             
             iterate_struct_members(src, .SKIP_CONSTANT | .SKIP_PLACE, #code {
-                push_data_trace_struct_member(packer, it_info.name);
-                if !recurse(packer, .{ it, src, it_info }, write_offset + it_info.offset_in_bytes) {
+                member_data_node := Data_Node.{ kind = .STRUCT_MEMBER, member_info = it_info, any = it, parent = data_node };
+                if !recurse(packer, *member_data_node, write_offset + it_info.offset_in_bytes) {
                     return false;
                 }
             });
@@ -216,12 +213,12 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool {
             
             element_any := Any.{ array_info.element_type, array_data };
             for 0..array_count-1 {
-                push_data_trace_array_index(packer, it);
-                if !recurse(packer, .{ element_any, src, null }, data_write_offset) {
+                element_data_node := Data_Node.{ kind = .ARRAY_INDEX, index = it, any = element_any, parent = data_node };
+                if !recurse(packer, *element_data_node, data_write_offset) {
                     return false;
                 }
                 element_any.value_pointer += array_info.element_type.runtime_size;
-                data_write_offset      += array_info.element_type.runtime_size;
+                data_write_offset         += array_info.element_type.runtime_size;
             }
             
           case .BOOL;    #through;
@@ -279,8 +276,9 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool {
                 array_add(*packer.packed_pointers, .{ raw_pointer, pointer_offset });
                 
                 // current parent and struct member info passed through pointer dereference
-                derefed_any := Any.{ type_pointed_to, raw_pointer };
-                if !recurse(packer, .{ derefed_any, src_ctx.parent, src_ctx.struct_member_info }, pointer_offset) {
+                dereferenced_any := Any.{ type_pointed_to, raw_pointer };
+                dereferenced_data_node := Data_Node.{ kind = .DEREFERENCE, any = dereferenced_any, parent = data_node };
+                if !recurse(packer, *dereferenced_data_node, pointer_offset) {
                     return false;
                 }
             }
@@ -291,8 +289,8 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool {
     }
     
     write_offset := get_bytes(packer, any.type.runtime_size);
-    // assert(write_offset == 0, "We do not yet support packing multiple top-level pieces of data at once with the data packer. write_offset was %", write_offset);
-    return recurse(packer, .{ any = any }, 0);
+    root_data_node := Data_Node.{ kind = .NO_CONTEXT, any = any };
+    return recurse(packer, *root_data_node, 0), write_offset;
 }
 
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
@@ -468,7 +466,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
 // we give the callback the packed pointer and what it's a pointer to, and then the callback can figure out if it is able to resolve the pointer
 // this seems better than just using a blind lookup table, since we can consider the context of the type we are pointing to.
 // should be much easier for users to implement extended behaviour this way
-Pack\ _Local_Data_Pointer_Proc :: #type (ptr: Any_With_Context) -> (*void, bool);
+Pack\ _Local_Data_Pointer_Proc :: #type (ptr: *Data_Node) -> (*void, bool);
 Unpack_Local_Data_Pointer_Proc :: #type (packed_ptr: *void, pointer_to: *Type_Info) -> (*void, bool);
 
 // when unpacking local data pointer, we will also want to override the type to match the internal ti, not whetever pointer_to says it is
@@ -635,66 +633,3 @@ add_debug_trace :: (format: string, args: ..Any) #expand {
     }
 } @PrintLike
 
-
-// TODO: we could use some souped-up version of this idea as a better alternative to the Any_With_Context
-//       but in order to do that we would need to store a *Type_Info_Struct_Member and pointer/Any to parent data
-// For now, this is just used to format a string when we encounter some kind of error in the data packer.
-Data_Trace_Node :: struct {
-    Kind :: enum { STRUCT_MEMBER; ARRAY_INDEX; DEREFERENCE; };
-    
-    kind:   Kind;
-    parent: *Data_Trace_Node;
-    union {
-        member_name:    string;
-        index:          int;
-    }
-}
-
-format_data_trace :: (node: *Data_Trace_Node) -> string {
-    builder: String_Builder;
-    init_string_builder(*builder);
-    format_data_trace(*builder, node);
-    return builder_to_string(*builder);
-}
-
-format_data_trace :: (builder: *String_Builder, node: *Data_Trace_Node) {
-    if node.parent != null {
-        format_data_trace(builder, node.parent);
-    }
-    
-    if node.kind == {
-      case .STRUCT_MEMBER;
-        print(builder, ".%", node.member_name);
-      case .ARRAY_INDEX;
-        print(builder, "[%]", node.index);
-      case .DEREFERENCE;
-        append(builder, ".*");
-    }
-}
-
-push_data_trace_node :: (packer: *Data_Packer, node: Data_Trace_Node) #expand {
-    node.parent = packer.data_trace_node;
-    packer.data_trace_node = *node;
-    `defer packer.data_trace_node = node.parent;
-}
-
-push_data_trace_struct_member :: (packer: *Data_Packer, member_name: string) #expand {
-    node := Data_Trace_Node.{ kind = .STRUCT_MEMBER, member_name = member_name };
-    node.parent = packer.data_trace_node;
-    packer.data_trace_node = *node;
-    `defer packer.data_trace_node = node.parent;
-}
-
-push_data_trace_array_index :: (packer: *Data_Packer, index: int) #expand {
-    node := Data_Trace_Node.{ kind = .ARRAY_INDEX, index = index };
-    node.parent = packer.data_trace_node;
-    packer.data_trace_node = *node;
-    `defer packer.data_trace_node = node.parent;
-}
-
-push_data_trace_dereference :: (packer: *Data_Packer) #expand {
-    node := Data_Trace_Node.{ kind = .DEREFERENCE };
-    node.parent = packer.data_trace_node;
-    packer.data_trace_node = *node;
-    `defer packer.data_trace_node = node.parent;
-}
