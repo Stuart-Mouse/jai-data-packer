@@ -45,40 +45,72 @@
         
     DEPENDENCIES: 
         This module depends on my Convert module for remap_data and related functionality.
+        
+        
+    REFACTORING TODO:
+        create a proper data packer structure that we can use as a sort of context, need to pass fewer parameters as we recurse
+        replace Any_With_Context with a more robust Data_Trace_Node system
+        allow data packer to handle multiple calls to pack_data, create a directory of top-level data
+            this will require some sort of external type table we can index to
 */
 
+#assert(size_of(*void) == size_of(s64));
 
-// TODO: figure out how we want to do data packer settings after we figure out the type info versioning issue
-// #add_context data_packer_settings: Data_Packer_Settings;
-// Data_Packer_Settings :: struct {
-//     pointer_recast_procs:   [..] struct { proc: Pointer_Recast_Proc; data: *void; };
-// }
+Pointer_And_Offset :: struct { pointer: *void; offset: s64; };
 
+Data_Packer :: struct {
+    buffer:             [..] u8;
+    packed_pointers:    [..] Pointer_And_Offset;
+    data_trace_node:    *Data_Trace_Node;
+    
+    // TODO: callbacks for recasting pointers and other context settings
+}
+
+// NOTE: returns offset into buffer instead of *void, since we may realloc the buffer at any time
+get_bytes :: (packer: *Data_Packer, count: int) -> int {
+    count_before := packer.buffer.count;
+    array_resize(*packer.buffer, count_before + count);
+    return count_before;
+}
+
+write_bytes :: inline (packer: *Data_Packer, offset: int, value_pointer: *void, size: int) {
+    memcpy(packer.buffer.data + offset, value_pointer, size);
+}
+
+write_any :: inline (packer: *Data_Packer, offset: int, any: Any) {
+    write_bytes(packer, offset, any.value_pointer, any.type.runtime_size);
+}
+
+deinit_packer :: (packer: *Data_Packer) {
+    array_free(packer.buffer);
+    array_free(packer.packed_pointers);
+    packer.* = .{};
+}
 
 // packs the given data and its type info and writes each to a separate file
 pack_file_with_type_info :: (file_path: string, type_info_file_path: string, data: Any) -> bool {
     {
-        buffer: [] u8;
-        defer array_free(buffer);
+        packer: Data_Packer;
+        defer deinit_packer(*packer);
         
-        if !pack_type_info_with_header(data.type, *buffer)  return false;
+        if !pack_type_info_with_header(*packer, data.type)  return false;
         
-        if !write_entire_file(type_info_file_path, buffer.(string)) {
+        if !write_entire_file(type_info_file_path, packer.buffer.(string)) {
             log("Failed to write type info to file!");
             return false;
         }
     }
     
     {
-        buffer: [] u8;
-        defer array_free(buffer);
+        packer: Data_Packer;
+        defer deinit_packer(*packer);
         
-        if !pack_data(data, *buffer) {
+        if !pack_data(*packer, data) {
             log("Failed to pack data!");
             return false;
         }
         
-        if !write_entire_file(file_path, buffer.(string)) {
+        if !write_entire_file(file_path, packer.buffer.(string)) {
             log("Failed to write data to file!");
             return false;
         }
@@ -104,14 +136,12 @@ unpack_file_with_type_info :: (file_path: string, info: *Type_Info, data: Any) -
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
 // TODO: use a dynamic array so that we don't have to actually realloc as often as we resize the buffer
 // TODO: could actually use a flat pool allocator, which would probably simplify code significantly (dont need buffer or write offset then)
-pack_data :: (data: Any, buffer: *[]u8) -> bool {
-    Pointer_And_Offset :: struct { pointer: *void; offset: s64; };
-    
+//       cannot use flat pool on the web though, so that doesn't help me much at the moment
+pack_data :: (packer: *Data_Packer, any: Any) -> bool {
     recurse :: (
+        packer:             *Data_Packer,
         src_ctx:            Any_With_Context,
-        buffer:             *[] u8, 
-        write_offset:       s64, 
-        packed_pointers:    *[..] Pointer_And_Offset
+        write_offset:       s64
     ) -> bool {
         // print("Writing % at offset %\n", (*data.type).(*Type).*, write_offset);
         src := src_ctx.any;
@@ -121,6 +151,16 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
         }
         
         if src.type.type == {
+          // case .ANY;
+          //   any := src.value_pointer.(*Any).*;
+            
+          //   if !recurse(.{ any.type,          src, null }, buffer, write_offset,     packed_pointers)  return false;
+          //   if !recurse(.{ any.value_pointer, src, null }, buffer, write_offset + 8, packed_pointers)  return false;
+            
+          //   data_write_offset := buffer.count;
+          //   array_resize(buffer, buffer.count + any.type.runtime_size);
+          //   return recurse(.{ any, src, null }, buffer, data_write_offset, packed_pointers);
+            
           case .STRUCT;
             struct_info := src.type.(*Type_Info_Struct);
             
@@ -134,15 +174,15 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
                 if union_member_info {
                     assert(union_member_info.flags & .CONSTANT == 0);
                     union_member := get_member(src, union_member_info);
-                    if !recurse(.{ union_member, src, union_member_info }, buffer, write_offset + union_member_info.offset_in_bytes, packed_pointers) {
+                    if !recurse(packer, .{ union_member, src, union_member_info }, write_offset + union_member_info.offset_in_bytes) {
                         return false;
                     }
                 }
             }
             
             iterate_struct_members(src, .SKIP_CONSTANT | .SKIP_PLACE, #code {
-                add_debug_trace(".%", it_info.name);
-                if !recurse(.{ it, src, it_info }, buffer, write_offset + it_info.offset_in_bytes, packed_pointers) {
+                push_data_trace_struct_member(packer, it_info.name);
+                if !recurse(packer, .{ it, src, it_info }, write_offset + it_info.offset_in_bytes) {
                     return false;
                 }
             });
@@ -152,72 +192,70 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
             array_data:        *void = ---;
             array_count:       int   = ---;
             
-            ti_array := src.type.(*Type_Info_Array);
-            if ti_array.array_type != .FIXED {
+            array_info := src.type.(*Type_Info_Array);
+            if array_info.array_type != .FIXED {
                 raw_array        := src.value_pointer.(*Resizable_Array).*;
                 array_data        = raw_array.data;
                 array_count       = raw_array.count;
-                data_write_offset = buffer.count; // elements will be written to end of buffer
                 
                 // when array count is 0, we don't want to set the array's data pointer
                 if raw_array.data == null || raw_array.count == 0 {
                     raw_array = .{}; // just make it all zero'd to be safe
                 } else {
+                    data_write_offset = get_bytes(packer, array_info.element_type.runtime_size * raw_array.count);
                     raw_array.data = data_write_offset.(*void);
-                    array_resize(buffer, buffer.count + (ti_array.element_type.runtime_size * raw_array.count));
                 }
-                memcpy(*buffer.data[write_offset], *raw_array, src.type.runtime_size);   // this will work for both resizable and slice because we use src.type.runtime_size
+                
+                // NOTE: this memcpy is valid for both resizable and slice because we use src.type.runtime_size
+                write_bytes(packer, write_offset, *raw_array, src.type.runtime_size);
             } else {
                 array_data        = src.value_pointer;
-                array_count       = ti_array.array_count;
+                array_count       = array_info.array_count;
                 data_write_offset = write_offset;
             }
             
-            elem_any := Any.{ ti_array.element_type, array_data };
+            element_any := Any.{ array_info.element_type, array_data };
             for 0..array_count-1 {
-                add_debug_trace("[%]", it);
-                if !recurse(.{ elem_any, src, null }, buffer, data_write_offset, packed_pointers) {
-                    print("Error while packing data for array.\n");
+                push_data_trace_array_index(packer, it);
+                if !recurse(packer, .{ element_any, src, null }, data_write_offset) {
                     return false;
                 }
-                elem_any.value_pointer += ti_array.element_type.runtime_size;
-                data_write_offset      += ti_array.element_type.runtime_size;
+                element_any.value_pointer += array_info.element_type.runtime_size;
+                data_write_offset      += array_info.element_type.runtime_size;
             }
             
           case .BOOL;    #through;
           case .ENUM;    #through;
           case .INTEGER; #through;
-          case .FLOAT;   
-            memcpy(*buffer.data[write_offset], src.value_pointer, src.type.runtime_size);
+          case .FLOAT;
+            write_any(packer, write_offset, src);
             
-          case .STRING;
+          case .STRING; 
             str := src.value_pointer.(*string).*;
-            data_write_offset := buffer.count;
             
-            array_resize(buffer, buffer.count + str.count);
-            memcpy(*buffer.data[data_write_offset], str.data, str.count);
+            data_write_offset := get_bytes(packer, str.count);
+            write_bytes(packer, data_write_offset, str.data, str.count);
             
             str.data = data_write_offset.(*u8);
-            memcpy(*buffer.data[write_offset], *str, size_of(string));
+            write_any(packer, write_offset, str);
             
           case .POINTER;
-            #assert(size_of(*void) == size_of(s64));
             raw_pointer := src.value_pointer.(**void).*;
             if raw_pointer == null {
-                memset(*buffer.data[write_offset], 0, size_of(*void));
+                write_any(packer, write_offset, null);
                 return true;
             }
             
             // maybe recast pointer to more specific type
-            ptr_any, done := recast_type_info(src);
+            pointer_any, done := recast_type_info(src);
             // if !done {
             //     for context.conversion_settings.pointer_recast_procs {
-            //         recast_ptr_any:, done = it.proc(.{ ptr_any, src_ctx.parent, src_ctx.struct_member_info }, it.data);
-            //         if done { ptr_any = recast_ptr_any; break; }
+            //         recast_ptr_any:, done = it.proc(.{ pointer_any, src_ctx.parent, src_ctx.struct_member_info }, it.data);
+            //         if done { pointer_any = recast_ptr_any; break; }
             //     }
             // }
-            // if ptr_any.type != src.type {
-            //     // print("recast a pointer: % -> %\n", (*src.type).(*Type).*, (*ptr_any.type).(*Type).*);
+            // if pointer_any.type != src.type {
+            //     // print("recast a pointer: % -> %\n", (*src.type).(*Type).*, (*pointer_any.type).(*Type).*);
             // }
             
             // ENCODE LOCAL DATA POINTERS
@@ -232,42 +270,29 @@ pack_data :: (data: Any, buffer: *[]u8) -> bool {
             //     return true; // we don't need to continue to pack data below, since it is internal data
             // }
             
-            // DEREF AND RECURSE, IF NOT ALREADY WRITTEN
-            ptr_offset := -1;
-            for packed_pointers.*  if it.pointer == raw_pointer { ptr_offset = it.offset; break; };
-            if ptr_offset == -1 {
-                ptr_offset = buffer.count;
-                array_add(packed_pointers, .{ raw_pointer, ptr_offset });
-                
-                type_pointed_to := ptr_any.type.(*Type_Info_Pointer).pointer_to;
-                array_resize(buffer, buffer.count + type_pointed_to.runtime_size);
+            // dereference pointer and recurse, if data pointed at has not already been written
+            pointer_offset: s64 = -1;
+            for packer.packed_pointers  if it.pointer == raw_pointer { pointer_offset = it.offset; break; };
+            if pointer_offset == -1 {
+                type_pointed_to := pointer_any.type.(*Type_Info_Pointer).pointer_to;
+                pointer_offset = get_bytes(packer, type_pointed_to.runtime_size);
+                array_add(*packer.packed_pointers, .{ raw_pointer, pointer_offset });
                 
                 // current parent and struct member info passed through pointer dereference
                 derefed_any := Any.{ type_pointed_to, raw_pointer };
-                if !recurse(.{ derefed_any, src_ctx.parent, src_ctx.struct_member_info }, buffer, ptr_offset, packed_pointers) {
-                    print("Error while packing data for array.\n");
+                if !recurse(packer, .{ derefed_any, src_ctx.parent, src_ctx.struct_member_info }, pointer_offset) {
                     return false;
                 }
             }
-            
-            memcpy(*buffer.data[write_offset], *ptr_offset, size_of(*void));
+            write_any(packer, write_offset, pointer_offset);
         }
         
         return true;
     }
     
-    packed_pointers: [..] Pointer_And_Offset;
-    defer array_free(packed_pointers);
-    
-    #if DEBUG  array_reset_keeping_memory(*debug_trace);
-    add_debug_trace("DATA");
-    
-    array_resize(buffer, buffer.count + data.type.runtime_size);
-    if !recurse(.{ any = data }, buffer, 0, *packed_pointers) {
-        return false;
-    }
-    
-    return true;
+    write_offset := get_bytes(packer, any.type.runtime_size);
+    // assert(write_offset == 0, "We do not yet support packing multiple top-level pieces of data at once with the data packer. write_offset was %", write_offset);
+    return recurse(packer, .{ any = any }, 0);
 }
 
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
@@ -287,14 +312,19 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
         }
         
         if type.type == {
+          // case .ANY;
+            // any := (*buffer.data[read_offset]).(*string);
+            // assert(str.data.(u64) >= 0 && str.data.(u64) < buffer.count.(u64));
+            // str.data = buffer.data + str.data.(s64);
+            
           case .STRUCT;
-            ti_struct := type.(*Type_Info_Struct);
+            struct_info := type.(*Type_Info_Struct);
             
             // temporary solution, just going to assume unions are trivially copyable and that we don't need to chase down any pointers inside
             // the problem is that we really can't use the type info here in our union resolution procs as we would in remap or pack procs
             // because we can't recognize the type tag value itself. perhaps we could use the type's name to try and do the resolution?
             // Or, theoretically, maybe we should do the remapping at the same time that we are unpacking the data?
-            if ti_struct.textual_flags & .UNION  return true;
+            if struct_info.textual_flags & .UNION  return true;
             
             struct_any := Any.{ type, *buffer[read_offset] };
             iterate_struct_members(struct_any, .SKIP_CONSTANT | .SKIP_PLACE, #code {
@@ -309,8 +339,8 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
             array_data:  s64 = ---;
             array_count: int = ---;
             
-            ti_array := type.(*Type_Info_Array);
-            if ti_array.array_type != .FIXED {
+            array_info := type.(*Type_Info_Array);
+            if array_info.array_type != .FIXED {
                 raw_array := (*buffer.data[read_offset]).(*Resizable_Array);
                 
                 // to be safe, make sure array has valid data and count before trying to unpack
@@ -329,17 +359,17 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                 raw_array.data = buffer.data + array_data;
             } else {
                 array_data  = read_offset;
-                array_count = ti_array.array_count;
+                array_count = array_info.array_count;
             }
             
             elem_read_offset := array_data;
             for 0..array_count-1 {
                 add_debug_trace("[%]", it);
-                if !recurse(ti_array.element_type, buffer, elem_read_offset, unpacked_offsets) {
+                if !recurse(array_info.element_type, buffer, elem_read_offset, unpacked_offsets) {
                     print("Error while unpacking data for array.\n");
                     return false;
                 }
-                elem_read_offset += ti_array.element_type.runtime_size;
+                elem_read_offset += array_info.element_type.runtime_size;
             }
             
           case .STRING;
@@ -385,18 +415,18 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                 // NOTE: The type info recast here will only work when unpacking with type info that is not dynamically loaded.
                 //       So this will work when we are loading our type info file, but will not do anything when using the loaded type info to unpack a data file.
                 //       This should be fine, since your data file probably doesn't contain any pointers to type info, but if they do, note that this recast will not occur!
-                ptr_any, done := recast_type_info(Any.{ type, ptr_ptr });
+                pointer_any, done := recast_type_info(Any.{ type, ptr_ptr });
                 // if !done {
                 //     for context.conversion_settings.pointer_recast_procs {
-                //         recast_ptr_any:, done = it.proc(.{ ptr_any, null, null }, it.data);
-                //         if done { ptr_any = recast_ptr_any; break; }
+                //         recast_ptr_any:, done = it.proc(.{ pointer_any, null, null }, it.data);
+                //         if done { pointer_any = recast_ptr_any; break; }
                 //     }
                 // }
-                // if ptr_any.type != type {
-                //     // print("recast a pointer: % -> %\n", (*type).(*Type).*, (*ptr_any.type).(*Type).*);
+                // if pointer_any.type != type {
+                //     // print("recast a pointer: % -> %\n", (*type).(*Type).*, (*pointer_any.type).(*Type).*);
                 // }
                 
-                type_pointed_to := ptr_any.type.(*Type_Info_Pointer).pointer_to;
+                type_pointed_to := pointer_any.type.(*Type_Info_Pointer).pointer_to;
                 if !recurse(type_pointed_to, buffer, data_offset, unpacked_offsets) {
                     print("Error while unpacking data through pointer.\n");
                     return false;
@@ -605,3 +635,66 @@ add_debug_trace :: (format: string, args: ..Any) #expand {
     }
 } @PrintLike
 
+
+// TODO: we could use some souped-up version of this idea as a better alternative to the Any_With_Context
+//       but in order to do that we would need to store a *Type_Info_Struct_Member and pointer/Any to parent data
+// For now, this is just used to format a string when we encounter some kind of error in the data packer.
+Data_Trace_Node :: struct {
+    Kind :: enum { STRUCT_MEMBER; ARRAY_INDEX; DEREFERENCE; };
+    
+    kind:   Kind;
+    parent: *Data_Trace_Node;
+    union {
+        member_name:    string;
+        index:          int;
+    }
+}
+
+format_data_trace :: (node: *Data_Trace_Node) -> string {
+    builder: String_Builder;
+    init_string_builder(*builder);
+    format_data_trace(*builder, node);
+    return builder_to_string(*builder);
+}
+
+format_data_trace :: (builder: *String_Builder, node: *Data_Trace_Node) {
+    if node.parent != null {
+        format_data_trace(builder, node.parent);
+    }
+    
+    if node.kind == {
+      case .STRUCT_MEMBER;
+        print(builder, ".%", node.member_name);
+      case .ARRAY_INDEX;
+        print(builder, "[%]", node.index);
+      case .DEREFERENCE;
+        append(builder, ".*");
+    }
+}
+
+push_data_trace_node :: (packer: *Data_Packer, node: Data_Trace_Node) #expand {
+    node.parent = packer.data_trace_node;
+    packer.data_trace_node = *node;
+    `defer packer.data_trace_node = node.parent;
+}
+
+push_data_trace_struct_member :: (packer: *Data_Packer, member_name: string) #expand {
+    node := Data_Trace_Node.{ kind = .STRUCT_MEMBER, member_name = member_name };
+    node.parent = packer.data_trace_node;
+    packer.data_trace_node = *node;
+    `defer packer.data_trace_node = node.parent;
+}
+
+push_data_trace_array_index :: (packer: *Data_Packer, index: int) #expand {
+    node := Data_Trace_Node.{ kind = .ARRAY_INDEX, index = index };
+    node.parent = packer.data_trace_node;
+    packer.data_trace_node = *node;
+    `defer packer.data_trace_node = node.parent;
+}
+
+push_data_trace_dereference :: (packer: *Data_Packer) #expand {
+    node := Data_Trace_Node.{ kind = .DEREFERENCE };
+    node.parent = packer.data_trace_node;
+    packer.data_trace_node = *node;
+    `defer packer.data_trace_node = node.parent;
+}

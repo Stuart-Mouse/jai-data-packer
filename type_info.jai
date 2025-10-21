@@ -45,17 +45,16 @@ Type_Info_File_Header :: struct {
     }
 }
 
-pack_type_info_with_header :: (info: *Type_Info, buffer: *[] u8) -> bool {
-    array_resize(buffer, size_of(Type_Info_File_Header));
-    header := buffer.data.(*Type_Info_File_Header);
+pack_type_info_with_header :: (packer: *Data_Packer, info: *Type_Info) -> bool {
+    assert(0 == get_bytes(packer, size_of(Type_Info_File_Header)));
+    header := packer.buffer.data.(*Type_Info_File_Header);
     header.header_version       = Type_Info_File_Header.CURRENT_HEADER_VERSION;
     header.jai_compiler_version = Type_Info_File_Header.CURRENT_JAI_COMPILER_VERSION;
     
-    if !pack_data(info, buffer) {
+    if !pack_data(packer, info) {
         log("Failed to pack type info!");
         return false;
     }
-    
     return true;
 }
 
@@ -108,9 +107,19 @@ get_base_type_info_for_jai_version :: (version: Compiler.Version_Info) -> *Type_
 
 #scope_module
 
-operator <  :: (a: Compiler.Version_Info, b: Compiler.Version_Info) -> bool { return a.major <  b.major || a.minor <  b.minor || a.micro <  b.micro; } 
-operator >  :: (a: Compiler.Version_Info, b: Compiler.Version_Info) -> bool { return a.major >  b.major || a.minor >  b.minor || a.micro >  b.micro; }
+operator <  :: (a: Compiler.Version_Info, b: Compiler.Version_Info) -> bool { 
+    if a.major >  b.major return false;
+    if a.minor >  b.minor return false;
+    if a.micro >= b.micro return false;
+    return true; 
+}
+operator >  :: (a: Compiler.Version_Info, b: Compiler.Version_Info) -> bool { 
+    if a.major <  b.major return false;
+    if a.minor <  b.minor return false;
+    if a.micro <= b.micro return false;
+    return true; 
+}
 operator == :: (a: Compiler.Version_Info, b: Compiler.Version_Info) -> bool { return a.major == b.major && a.minor == b.minor && a.micro == b.micro; }
-operator <= :: (a: Compiler.Version_Info, b: Compiler.Version_Info) -> bool { return a < b || a == b; }
-operator >= :: (a: Compiler.Version_Info, b: Compiler.Version_Info) -> bool { return a > b || a == b; }
+operator <= :: (a: Compiler.Version_Info, b: Compiler.Version_Info) -> bool { return a.major <= b.major && a.minor <= b.minor && a.micro <= b.micro; }
+operator >= :: (a: Compiler.Version_Info, b: Compiler.Version_Info) -> bool { return a.major >= b.major && a.minor >= b.minor && a.micro >= b.micro; }
 
