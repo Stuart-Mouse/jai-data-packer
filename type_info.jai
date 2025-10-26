@@ -30,10 +30,9 @@
     
 */
 
+Type_Table :: [] *Type_Info;
 
-
-
-Type_Info_File_Header :: struct {
+Type_Table_Header :: struct {
     header_version:         u64;
     jai_compiler_version:   Compiler.Version_Info;
     
@@ -45,11 +44,59 @@ Type_Info_File_Header :: struct {
     }
 }
 
+// pack_type_table :: (packer: *Data_Packer, type_table: Type_Table) -> bool {
+//     packer: Data_Packer;
+    
+//     assert(0 == get_bytes(packer, size_of(Type_Table_Header)));
+//     header := packer.buffer.data.(*Type_Table_Header);
+//     header.header_version       = Type_Table_Header.CURRENT_HEADER_VERSION;
+//     header.jai_compiler_version = Type_Table_Header.CURRENT_JAI_COMPILER_VERSION;
+    
+//     if !pack_data(*packer, type_table) {
+//         log("Failed to pack type table!");
+//         return false;
+//     }
+//     return true;
+// }
+
+// unpack_type_table :: (file: [] u8, base_type_info: *Type_Info = null,, allocator := temp) -> bool, Type_Table {
+//     file := _file;
+    
+//     // if base_type info is provided, then we assume header is not present
+//     header: *Type_Table_Header;
+//     if !base_type_info {
+//         header := file.data.(*Type_Table_Header);
+//         file.data  += size_of(Type_Table_Header);
+//         file.count -= size_of(Type_Table_Header);
+//         base_type_info = get_base_type_info_for_jai_version(header.jai_compiler_version);
+//     }
+    
+//     type_table, ok := unpack_data(base_type_info, *file);
+//     if !ok  return false, .[];
+    
+//     // if we unpacked type info using old base type info, we need to remap to the new format
+//     if base_type_info != xx *Type_Info {
+//         // temporarily add custom remapping proc to context, then remove in defer
+//         array_add(*context.conversion_settings.user_remap_procs, .{ convert_type_info, null });
+//         defer context.conversion_settings.user_remap_procs.count -= 1;
+        
+//         // We push temp allocator for everything allocated in remapping process
+//         new_table: [] *Type_Info;
+//         if !Convert.any_to_any(new_table, info_any,, allocator) {
+//             log("Unable to remap old type info to new type info.");
+//             return null;
+//         }
+//         type_table = new_table;
+//     }
+    
+//     return true, type_table;
+// }
+
 pack_type_info_with_header :: (packer: *Data_Packer, info: *Type_Info) -> bool {
-    assert(0 == get_bytes(packer, size_of(Type_Info_File_Header)));
-    header := packer.buffer.data.(*Type_Info_File_Header);
-    header.header_version       = Type_Info_File_Header.CURRENT_HEADER_VERSION;
-    header.jai_compiler_version = Type_Info_File_Header.CURRENT_JAI_COMPILER_VERSION;
+    assert(0 == get_bytes(packer, size_of(Type_Table_Header)));
+    header := packer.buffer.data.(*Type_Table_Header);
+    header.header_version       = Type_Table_Header.CURRENT_HEADER_VERSION;
+    header.jai_compiler_version = Type_Table_Header.CURRENT_JAI_COMPILER_VERSION;
     
     if !pack_data(packer, info) {
         log("Failed to pack type info!");
@@ -64,11 +111,11 @@ unpack_type_info_with_header :: (_file: [] u8, base_type_info: *Type_Info = null
     file := _file;
     
     // if base_type info is provided, then we assume header is not present
-    header: *Type_Info_File_Header;
+    header: *Type_Table_Header;
     if !base_type_info {
-        header := file.data.(*Type_Info_File_Header);
-        file.data  += size_of(Type_Info_File_Header);
-        file.count -= size_of(Type_Info_File_Header);
+        header := file.data.(*Type_Table_Header);
+        file.data  += size_of(Type_Table_Header);
+        file.count -= size_of(Type_Table_Header);
         base_type_info = get_base_type_info_for_jai_version(header.jai_compiler_version);
     }
     

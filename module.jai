@@ -46,10 +46,9 @@
     DEPENDENCIES: 
         This module depends on my Convert module for remap_data and related functionality.
         
-        
     REFACTORING TODO:
-        create a proper data packer structure that we can use as a sort of context, need to pass fewer parameters as we recurse
-        replace Any_With_Context with a more robust Data_Node system
+        / create a proper data packer structure that we can use as a sort of context, need to pass fewer parameters as we recurse
+        / replace Any_With_Context with a more robust Data_Node system
         allow data packer to handle multiple calls to pack_data, create a directory of top-level data
             this will require some sort of external type table we can index to
 */
@@ -59,6 +58,7 @@
 Pointer_And_Offset :: struct { pointer: *void; offset: s64; };
 
 Data_Packer :: struct {
+    type_table:         [] *Type_Info;
     buffer:             [..] u8;
     packed_pointers:    [..] Pointer_And_Offset;
     // TODO: callbacks for recasting pointers and other context settings
