@@ -139,7 +139,9 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
         data_node:     *Data_Node,
         write_offset:  s64
     ) -> bool {
-        // print("Writing % at offset %\n", (*data.type).(*Type).*, write_offset);
+        // log("Writing % at offset %", (*data_node.type).(*Type).*, write_offset);
+        // log(format_data_trace(data_node,, temp));
+        
         src := data_node.any;
         
         while src.type.type == .VARIANT {
