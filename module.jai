@@ -179,7 +179,7 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
                 }
             }
             
-            iterate_struct_members(src, .SKIP_CONSTANT | .SKIP_PLACE, #code {
+            iterate_struct_members(src, .SKIP_CONSTANT_AND_OVERLAY, #code {
                 member_data_node := Data_Node.{ kind = .STRUCT_MEMBER, member_info = it_info, any = it, parent = data_node };
                 if !recurse(packer, *member_data_node, write_offset + it_info.offset_in_bytes) {
                     return false;
@@ -327,7 +327,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
             if struct_info.textual_flags & .UNION  return true;
             
             struct_any := Any.{ type, *buffer[read_offset] };
-            iterate_struct_members(struct_any, .SKIP_CONSTANT | .SKIP_PLACE, #code {
+            iterate_struct_members(struct_any, .SKIP_CONSTANT_AND_OVERLAY, #code {
                 add_debug_trace(".%", it_info.name);
                 if !recurse(it.type, buffer, read_offset + it_info.offset_in_bytes, unpacked_offsets) {
                     print("Error while unpacking data for struct member.\n");
