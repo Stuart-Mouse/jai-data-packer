@@ -163,19 +163,15 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
             struct_info := src.type.(*Type_Info_Struct);
             
             if struct_info.textual_flags & .UNION {
-                union_member_info: *Type_Info_Struct_Member;
-                for context.conversion_settings.get_union_type_procs {
-                    union_member_info = it.proc(src.type, data_node, it.data);
-                    if union_member_info  break;
+                if !is_tagged_union_type(struct_info) {
+                    write_any(packer, write_offset, src);
+                    return true;
                 }
-                // If 'member' was not set, this is not necessarily treated as an error. Perhaps the union was just empty.
-                if union_member_info {
-                    assert(union_member_info.flags & .CONSTANT == 0);
-                    union_member := get_member(src, union_member_info);
-                    member_data_node := Data_Node.{ kind = .STRUCT_MEMBER, member_info = union_member_info, any = union_member, parent = data_node };
-                    if !recurse(packer, *member_data_node, write_offset + union_member_info.offset_in_bytes) {
-                        return false;
-                    }
+                
+                valid_member, valid_member_info := get_valid_union_member(src);
+                member_data_node := Data_Node.{ kind = .STRUCT_MEMBER, member_info = valid_member_info, any = valid_member, parent = data_node };
+                if !recurse(packer, *member_data_node, write_offset + valid_member_info.offset_in_bytes) {
+                    return false;
                 }
             }
             
