@@ -133,7 +133,7 @@ unpack_file_with_type_info :: (file_path: string, info: *Type_Info, data: Any) -
 // TODO: use a dynamic array so that we don't have to actually realloc as often as we resize the buffer
 // TODO: could actually use a flat pool allocator, which would probably simplify code significantly (dont need buffer or write offset then)
 //       cannot use flat pool on the web though, so that doesn't help me much at the moment
-pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
+pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool, int {
     recurse :: (
         packer:        *Data_Packer,
         data_node:     *Data_Node,
@@ -142,13 +142,8 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
         // log("Writing % at offset %", (*data_node.type).(*Type).*, write_offset);
         // log(format_data_trace(data_node,, temp));
         
-        src := data_node.any;
-        
-        while src.type.type == .VARIANT {
-            src.type = src.type.(*Type_Info_Variant).variant_of;
-        }
-        
-        if src.type.type == {
+        base_type := get_variant_base_type(data_node.type);
+        if base_type.type == {
           // case .ANY;
           //   any := src.value_pointer.(*Any).*;
             
@@ -160,36 +155,36 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
           //   return recurse(.{ any, src, null }, buffer, data_write_offset, packed_pointers);
             
           case .STRUCT;
-            struct_info := src.type.(*Type_Info_Struct);
+            struct_info := base_type.(*Type_Info_Struct);
             
             if struct_info.textual_flags & .UNION {
-                if !is_tagged_union_type(struct_info) {
-                    write_any(packer, write_offset, src);
-                    return true;
+                if struct_info.textual_flags & .UNION_IS_TAGGED {
+                    member_data_node := get_valid_union_member(data_node);
+                    if member_data_node {
+                        if !recurse(packer, member_data_node, write_offset + member_data_node.member_info.offset_in_bytes) {
+                            return false;
+                        }
+                    }
+                } else {
+                    write_any(packer, write_offset, data_node.any);
                 }
-                
-                valid_member, valid_member_info := get_valid_union_member(src);
-                member_data_node := Data_Node.{ kind = .STRUCT_MEMBER, member_info = valid_member_info, any = valid_member, parent = data_node };
-                if !recurse(packer, *member_data_node, write_offset + valid_member_info.offset_in_bytes) {
+                return true;
+            }
+            
+            for:members data_node {
+                if !recurse(packer, it, write_offset + it.member_info.offset_in_bytes) {
                     return false;
                 }
             }
-            
-            iterate_struct_members(src, .SKIP_CONSTANT_AND_OVERLAY, #code {
-                member_data_node := Data_Node.{ kind = .STRUCT_MEMBER, member_info = it_info, any = it, parent = data_node };
-                if !recurse(packer, *member_data_node, write_offset + it_info.offset_in_bytes) {
-                    return false;
-                }
-            });
             
           case .ARRAY;
             data_write_offset: s64   = ---;
             array_data:        *void = ---;
             array_count:       int   = ---;
             
-            array_info := src.type.(*Type_Info_Array);
+            array_info := base_type.(*Type_Info_Array);
             if array_info.array_type != .FIXED {
-                raw_array        := src.value_pointer.(*Resizable_Array).*;
+                raw_array        := data_node.value_pointer.(*Resizable_Array).*;
                 array_data        = raw_array.data;
                 array_count       = raw_array.count;
                 
@@ -201,10 +196,10 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
                     raw_array.data = data_write_offset.(*void);
                 }
                 
-                // NOTE: this memcpy is valid for both resizable and slice because we use src.type.runtime_size
-                write_bytes(packer, write_offset, *raw_array, src.type.runtime_size);
+                // NOTE: this memcpy is valid for both resizable and slice because we use data_node.type.runtime_size
+                write_bytes(packer, write_offset, *raw_array, data_node.type.runtime_size);
             } else {
-                array_data        = src.value_pointer;
+                array_data        = data_node.value_pointer;
                 array_count       = array_info.array_count;
                 data_write_offset = write_offset;
             }
@@ -223,10 +218,10 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
           case .ENUM;    #through;
           case .INTEGER; #through;
           case .FLOAT;
-            write_any(packer, write_offset, src);
+            write_any(packer, write_offset, data_node);
             
           case .STRING; 
-            str := src.value_pointer.(*string).*;
+            str := data_node.value_pointer.(*string).*;
             
             data_write_offset := get_bytes(packer, str.count);
             write_bytes(packer, data_write_offset, str.data, str.count);
@@ -235,14 +230,14 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
             write_any(packer, write_offset, str);
             
           case .POINTER;
-            raw_pointer := src.value_pointer.(**void).*;
+            raw_pointer := data_node.value_pointer.(**void).*;
             if raw_pointer == null {
                 write_any(packer, write_offset, null);
                 return true;
             }
             
             // maybe recast pointer to more specific type
-            pointer_any, done := recast_type_info(src);
+            pointer_any, done := recast_type_info(data_node.any);
             // if !done {
             //     for context.conversion_settings.pointer_recast_procs {
             //         recast_ptr_any:, done = it.proc(.{ pointer_any, src_ctx.parent, src_ctx.struct_member_info }, it.data);
@@ -287,10 +282,11 @@ pack_data :: (packer: *Data_Packer, any: Any) -> bool, int {
     }
     
     write_offset := get_bytes(packer, any.type.runtime_size);
-    root_data_node := Data_Node.{ kind = .NO_CONTEXT, any = any };
+    root_data_node := Data_Node.{ kind = .NO_CONTEXT, name = debug_data_name, any = any };
     return recurse(packer, *root_data_node, 0), write_offset;
 }
 
+// TODO: should probably also use data_node here in case we do run into issues we want to report, even though this code is simpler than the pack_data
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
 // we can't figure out where all pointers are within blob without just doing the whole recursive thing
 // but we may have multiple pointers that point to the same data
@@ -303,10 +299,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
     ) -> bool {
         // print("Unpacking data of type % at offset %\n", recast_type_info(Any.{ type, *buffer[read_offset] }), offset);
         
-        while type.type == .VARIANT {
-            type = type.(*Type_Info_Variant).variant_of;
-        }
-        
+        type = get_variant_base_type(type);
         if type.type == {
           // case .ANY;
             // any := (*buffer.data[read_offset]).(*string);
@@ -315,14 +308,20 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
             
           case .STRUCT;
             struct_info := type.(*Type_Info_Struct);
+            struct_any  := Any.{ type, *buffer.data[read_offset] };
             
-            // temporary solution, just going to assume unions are trivially copyable and that we don't need to chase down any pointers inside
-            // the problem is that we really can't use the type info here in our union resolution procs as we would in remap or pack procs
-            // because we can't recognize the type tag value itself. perhaps we could use the type's name to try and do the resolution?
-            // Or, theoretically, maybe we should do the remapping at the same time that we are unpacking the data?
-            if struct_info.textual_flags & .UNION  return true;
+            if struct_info.textual_flags & .UNION {
+                if struct_info.textual_flags & .UNION_IS_TAGGED {
+                    valid_member, valid_member_info := get_valid_union_member(struct_any);
+                    if valid_member.type {
+                        if !recurse(valid_member.type, buffer, read_offset + valid_member_info.offset_in_bytes, unpacked_offsets) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
             
-            struct_any := Any.{ type, *buffer[read_offset] };
             iterate_struct_members(struct_any, .SKIP_CONSTANT_AND_OVERLAY, #code {
                 add_debug_trace(".%", it_info.name);
                 if !recurse(it.type, buffer, read_offset + it_info.offset_in_bytes, unpacked_offsets) {
