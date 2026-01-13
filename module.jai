@@ -307,12 +307,11 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
             // str.data = buffer.data + str.data.(s64);
             
           case .STRUCT;
-            struct_info := type.(*Type_Info_Struct);
-            struct_any  := Any.{ type, *buffer.data[read_offset] };
+            structure := Any_Structure.from(Any.{ type, *buffer.data[read_offset] });
             
-            if struct_info.textual_flags & .UNION {
-                if struct_info.textual_flags & .UNION_IS_TAGGED {
-                    valid_member, valid_member_info := get_valid_union_member(struct_any);
+            if structure.textual_flags & .UNION {
+                if structure.textual_flags & .UNION_IS_TAGGED {
+                    valid_member, valid_member_info := get_valid_union_member(structure.as_any);
                     if valid_member.type {
                         if !recurse(valid_member.type, buffer, read_offset + valid_member_info.offset_in_bytes, unpacked_offsets) {
                             return false;
@@ -322,13 +321,13 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                 return true;
             }
             
-            iterate_struct_members(struct_any, .SKIP_CONSTANT_AND_OVERLAY, #code {
+            for structure {
                 add_debug_trace(".%", it_info.name);
                 if !recurse(it.type, buffer, read_offset + it_info.offset_in_bytes, unpacked_offsets) {
                     print("Error while unpacking data for struct member.\n");
                     return false;
                 }
-            });
+            }
             
           case .ARRAY;
             array_data:  s64 = ---;
