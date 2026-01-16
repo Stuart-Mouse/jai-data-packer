@@ -311,8 +311,8 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
             
             if structure.textual_flags & .UNION {
                 if structure.textual_flags & .UNION_IS_TAGGED {
-                    valid_member, valid_member_info := get_valid_union_member(structure.as_any);
-                    if valid_member.type {
+                    ok, valid_member, valid_member_info := get_valid_union_member(structure.as_any);
+                    if ok {
                         if !recurse(valid_member.type, buffer, read_offset + valid_member_info.offset_in_bytes, unpacked_offsets) {
                             return false;
                         }
