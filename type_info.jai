@@ -109,17 +109,17 @@ pack_type_info_with_header :: (packer: *Data_Packer, info: *Type_Info) -> bool {
 // the type info returned here may be a view onto the file contents or will be a remapped copy allocated with temp
 unpack_type_info_with_header :: (_file: [] u8, base_type_info: *Type_Info = null) -> *Type_Info {
     file := _file;
+    starting_offset: int;
     
     // if base_type info is provided, then we assume header is not present
     header: *Type_Table_Header;
-    if !base_type_info {
+    if base_type_info == null {
         header := file.data.(*Type_Table_Header);
-        file.data  += size_of(Type_Table_Header);
-        file.count -= size_of(Type_Table_Header);
+        starting_offset = size_of(Type_Table_Header);
         base_type_info = get_base_type_info_for_jai_version(header.jai_compiler_version);
     }
     
-    info_any, ok := unpack_data(base_type_info, *file);
+    info_any, ok := unpack_data(base_type_info, *file, starting_offset);
     if !ok  return null;
     
     // if we unpacked type info using old base type info, we need to remap to the new format
@@ -135,7 +135,7 @@ unpack_type_info_with_header :: (_file: [] u8, base_type_info: *Type_Info = null
             log("Unable to remap old type info to new type info.");
             return null;
         }
-        info_any = new_info;
+        return new_info;
         
         // TODO: we should use some deep compare proc to validate that our type infos were converted correctly
     }

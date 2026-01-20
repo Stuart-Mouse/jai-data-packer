@@ -139,7 +139,8 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
         data_node:     *Data_Node,
         write_offset:  s64
     ) -> bool {
-        // log("Writing % at offset %", (*data_node.type).(*Type).*, write_offset);
+        // log("Writing % at offset %", as_type(data_node.type), write_offset);
+        // if data_node.type.runtime_size <= 8  log("value: %", data_node.any);
         // log(format_data_trace(data_node,, temp));
         
         base_type := get_variant_base_type(data_node.type);
@@ -218,7 +219,7 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
           case .ENUM;    #through;
           case .INTEGER; #through;
           case .FLOAT;
-            write_any(packer, write_offset, data_node);
+            write_any(packer, write_offset, data_node.any);
             
           case .STRING; 
             str := data_node.value_pointer.(*string).*;
@@ -283,21 +284,21 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
     
     write_offset := get_bytes(packer, any.type.runtime_size);
     root_data_node := Data_Node.{ kind = .NO_CONTEXT, name = debug_data_name, any = any };
-    return recurse(packer, *root_data_node, 0), write_offset;
+    return recurse(packer, *root_data_node, write_offset), write_offset;
 }
 
 // TODO: should probably also use data_node here in case we do run into issues we want to report, even though this code is simpler than the pack_data
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
 // we can't figure out where all pointers are within blob without just doing the whole recursive thing
 // but we may have multiple pointers that point to the same data
-unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
+unpack_data :: (type: *Type_Info, buffer: *[] u8, starting_offset := 0) -> (Any, bool) {
     recurse :: (
         type:               *Type_Info, 
         buffer:             *[] u8, 
         read_offset:        s64, 
         unpacked_offsets:   *[..] s64
     ) -> bool {
-        // print("Unpacking data of type % at offset %\n", recast_type_info(Any.{ type, *buffer[read_offset] }), offset);
+        // print("Unpacking data of type % at offset %\n", as_type(type), read_offset);
         
         type = get_variant_base_type(type);
         if type.type == {
@@ -314,6 +315,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
                     ok, valid_member, valid_member_info := get_valid_union_member(structure.as_any);
                     if ok {
                         if !recurse(valid_member.type, buffer, read_offset + valid_member_info.offset_in_bytes, unpacked_offsets) {
+                            log("Error while recursing for tagged union member");
                             return false;
                         }
                     }
@@ -324,7 +326,7 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
             for structure {
                 add_debug_trace(".%", it_info.name);
                 if !recurse(it.type, buffer, read_offset + it_info.offset_in_bytes, unpacked_offsets) {
-                    print("Error while unpacking data for struct member.\n");
+                    log("Error while unpacking data for struct member.\n");
                     return false;
                 }
             }
@@ -436,11 +438,11 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8) -> (Any, bool) {
     #if DEBUG  array_reset_keeping_memory(*debug_trace);
     add_debug_trace("DATA");
     
-    if !recurse(type, buffer, 0, *unpacked_offsets) {
+    if !recurse(type, buffer, starting_offset, *unpacked_offsets) {
         return Any.{}, false;
     }
     
-    return Any.{ type, buffer.data }, true;
+    return Any.{ type, buffer.data + starting_offset }, true;
 }
 
 
