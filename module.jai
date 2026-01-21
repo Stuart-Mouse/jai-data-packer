@@ -552,6 +552,24 @@ recast_type_info :: (any: Any) -> Any, bool {
         }
     }
     
+    {
+        using Preload_0_2_024;
+        if any.type == xx *Type_Info {
+            ti := any.value_pointer.(**Type_Info).*;
+            if ti.type == {
+                case .INTEGER;      return Any.{ xx *Type_Info_Integer,   any.value_pointer }, true;
+                case .FLOAT;        return Any.{ xx *Type_Info_Float,     any.value_pointer }, true;
+                case .STRING;       return Any.{ xx *Type_Info_String,    any.value_pointer }, true;
+                case .POINTER;      return Any.{ xx *Type_Info_Pointer,   any.value_pointer }, true;
+                case .PROCEDURE;    return Any.{ xx *Type_Info_Procedure, any.value_pointer }, true;
+                case .STRUCT;       return Any.{ xx *Type_Info_Struct,    any.value_pointer }, true;
+                case .ARRAY;        return Any.{ xx *Type_Info_Array,     any.value_pointer }, true;
+                case .ENUM;         return Any.{ xx *Type_Info_Enum,      any.value_pointer }, true;
+                case .VARIANT;      return Any.{ xx *Type_Info_Variant,   any.value_pointer }, true;
+            }
+        }
+    }
+    
     return any, false;
 }
 

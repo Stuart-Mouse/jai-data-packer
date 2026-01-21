@@ -146,6 +146,7 @@ unpack_type_info_with_header :: (_file: [] u8, base_type_info: *Type_Info = null
 // TODO: maybe we should also have some forwards-compatibility and remap newer type infos back into older formats if version encoded is newer than jai version we compiled with
 get_base_type_info_for_jai_version :: (version: Compiler.Version_Info) -> *Type_Info {
     if version <= Compiler.Version_Info.{ 0, 2, 012 }  { log("base type info selected for version: %", "0_2_012"); return xx *Preload_0_2_012.Type_Info; }
+    if version <= Compiler.Version_Info.{ 0, 2, 024 }  { log("base type info selected for version: %", "0_2_024"); return xx *Preload_0_2_024.Type_Info; }
     
     // else use latest version
     log("using latest type info verison");
