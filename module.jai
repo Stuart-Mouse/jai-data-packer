@@ -512,6 +512,7 @@ decode_local_data_pointer :: inline (ptr: *void) -> (ptr_data: u32, user_data: u
 Compiler :: #import "Compiler";     // for is_subclass_of
 
 #import "Utils";
+using Reflect :: #import "Reflect";
 using Convert :: #import "Convert";
 
 
