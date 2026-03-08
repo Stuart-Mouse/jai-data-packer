@@ -149,7 +149,6 @@ get_base_type_info_for_jai_version :: (version: Compiler.Version_Info) -> *Type_
     if version <= Compiler.Version_Info.{ 0, 2, 024 }  { log("base type info selected for version: %", "0_2_024"); return xx *Preload_0_2_024.Type_Info; }
     
     // else use latest version
-    log("using latest type info verison");
     return xx *Type_Info;
 }
 
