@@ -162,6 +162,18 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
                 if struct_info.textual_flags & .UNION_IS_TAGGED {
                     member_data_node := get_valid_union_member(data_node);
                     if member_data_node {
+                        tag_any := get_union_tag(data_node.any);
+                        tag_data_node := Data_Node.{ 
+                            kind        = .STRUCT_MEMBER, 
+                            parent      = data_node, 
+                            any         = tag_any, 
+                            member_info = *struct_info.members[0],
+                        };
+                        if !recurse(packer, *tag_data_node, write_offset) {
+                            return false;
+                        }
+                        
+                        // write valid union member contents
                         if !recurse(packer, member_data_node, write_offset + member_data_node.member_info.offset_in_bytes) {
                             return false;
                         }
