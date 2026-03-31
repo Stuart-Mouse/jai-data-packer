@@ -62,6 +62,18 @@ Data_Packer :: struct {
     buffer:             [..] u8;
     packed_pointers:    [..] Pointer_And_Offset;
     // TODO: callbacks for recasting pointers and other context settings
+    
+    
+    // TODO: use chunk system to replace point_and_offset
+    //       should be able to have multiple pointers that just point into the same overall chunk
+    //       best version will require logic to make chunks bigger after initial creation, but before output file is generated
+    //       this will probably mean that we have to defer writing anything to the output buffer until the very end...
+    // chunks: [..] Chunk;
+    // Chunk :: struct {
+    //     pointer:    *void;
+    //     offset:     s64;
+    //     size:       s64;
+    // }
 }
 
 // NOTE: returns offset into buffer instead of *void, since we may realloc the buffer at any time
@@ -77,6 +89,11 @@ write_bytes :: inline (packer: *Data_Packer, offset: int, value_pointer: *void, 
 
 write_any :: inline (packer: *Data_Packer, offset: int, any: Any) {
     write_bytes(packer, offset, any.value_pointer, any.type.runtime_size);
+}
+
+get_pointer_to_type :: inline (packer: *Data_Packer, offset: int, $TYPE: Type) -> *TYPE {
+    assert(offset >= 0 && offset + size_of(TYPE) <= packer.buffer.count);
+    return (packer.buffer.data + offset).(*TYPE);
 }
 
 deinit_packer :: (packer: *Data_Packer) {
@@ -122,7 +139,7 @@ unpack_file_with_type_info :: (file_path: string, info: *Type_Info, data: Any) -
     if !ok  return false;
     defer free(data_file);
     
-    file_data:, ok = unpack_data(info, xx *data_file);
+    file_data:, ok = unpack_data(info, xx data_file);
     if !ok  return false;
     
     return Convert.any_to_any(data, file_data);
@@ -251,27 +268,8 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
             
             // maybe recast pointer to more specific type
             pointer_any, done := recast_type_info(data_node.any);
-            // if !done {
-            //     for context.conversion_settings.pointer_recast_procs {
-            //         recast_ptr_any:, done = it.proc(.{ pointer_any, src_ctx.parent, src_ctx.struct_member_info }, it.data);
-            //         if done { pointer_any = recast_ptr_any; break; }
-            //     }
-            // }
-            // if pointer_any.type != src.type {
-            //     // print("recast a pointer: % -> %\n", (*src.type).(*Type).*, (*pointer_any.type).(*Type).*);
-            // }
             
-            // ENCODE LOCAL DATA POINTERS
-            // pack_local_ptr := context.pack_local_data_pointer;
-            // if pack_local_ptr != null {
-            //     ptr_data, ok := pack_local_ptr(_data, parent, data_tism);
-            //     if !ok {
-            //         log("Error encountered while trying to pack local data pointer!");
-            //         return false;
-            //     }
-            //     memcpy(*buffer.data[write_offset], *ptr_data, size_of(*void));
-            //     return true; // we don't need to continue to pack data below, since it is internal data
-            // }
+            // TODO: implement special pointer handling
             
             // dereference pointer and recurse, if data pointed at has not already been written
             pointer_offset: s64 = -1;
@@ -282,9 +280,10 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
                 array_add(*packer.packed_pointers, .{ raw_pointer, pointer_offset });
                 
                 // current parent and struct member info passed through pointer dereference
-                dereferenced_any := Any.{ type_pointed_to, raw_pointer };
-                dereferenced_data_node := Data_Node.{ kind = .DEREFERENCE, any = dereferenced_any, parent = data_node };
-                if !recurse(packer, *dereferenced_data_node, pointer_offset) {
+                // dereferenced_any := Any.{ type_pointed_to, raw_pointer };
+                // dereferenced_data_node := Data_Node.{ kind = .DEREFERENCE, any = dereferenced_any, parent = data_node };
+                dereferenced_data_node := dereference_pointer(data_node);
+                if !recurse(packer, dereferenced_data_node, pointer_offset) {
                     return false;
                 }
             }
@@ -301,160 +300,136 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
 
 // TODO: should probably also use data_node here in case we do run into issues we want to report, even though this code is simpler than the pack_data
 // converts pointers in binary blob back into absolute pointers and returns an Any of the base data
-// we can't figure out where all pointers are within blob without just doing the whole recursive thing
+// we can't figure out where all pointers are within blob without just doing the whole recursive thing (unless we created some index that gets stored along with file.)
 // but we may have multiple pointers that point to the same data
-unpack_data :: (type: *Type_Info, buffer: *[] u8, starting_offset := 0) -> (Any, bool) {
+unpack_data :: (type: *Type_Info, buffer: [] u8, offset: s64 = 0, debug_data_name := "data") -> (Any, bool) {
     recurse :: (
-        type:               *Type_Info, 
-        buffer:             *[] u8, 
-        read_offset:        s64, 
-        unpacked_offsets:   *[..] s64
+        packer:         *Data_Packer,
+        data_node:      *Data_Node,
+        read_offset:    s64, 
     ) -> bool {
         // print("Unpacking data of type % at offset %\n", as_type(type), read_offset);
         
-        type = get_variant_base_type(type);
-        if type.type == {
+        base_type := get_variant_base_type(data_node.type);
+        if base_type.type == {
           // case .ANY;
             // any := (*buffer.data[read_offset]).(*string);
             // assert(str.data.(u64) >= 0 && str.data.(u64) < buffer.count.(u64));
             // str.data = buffer.data + str.data.(s64);
             
           case .STRUCT;
-            structure := Any_Structure.from(Any.{ type, *buffer.data[read_offset] });
+            struct_info := base_type.(*Type_Info_Struct);
             
-            if structure.textual_flags & .UNION {
-                if structure.textual_flags & .UNION_IS_TAGGED {
-                    ok, valid_member, valid_member_info := get_valid_union_member(structure.as_any);
-                    if ok {
-                        if !recurse(valid_member.type, buffer, read_offset + valid_member_info.offset_in_bytes, unpacked_offsets) {
-                            log("Error while recursing for tagged union member");
-                            return false;
-                        }
+            if struct_info.textual_flags & .UNION {
+                if struct_info.textual_flags & .UNION_IS_TAGGED {
+                    member_data_node := get_valid_union_member(data_node);
+                    if member_data_node {
+                        if !recurse(packer, member_data_node, read_offset + member_data_node.member_info.offset_in_bytes)  return false;
                     }
                 }
                 return true;
             }
             
-            for structure {
-                add_debug_trace(".%", it_info.name);
-                if !recurse(it.type, buffer, read_offset + it_info.offset_in_bytes, unpacked_offsets) {
-                    log("Error while unpacking data for struct member.\n");
-                    return false;
-                }
+            for:members data_node {
+                if !recurse(packer, it, read_offset + it.member_info.offset_in_bytes)  return false;
             }
             
           case .ARRAY;
-            array_data:  s64 = ---;
-            array_count: int = ---;
+            // TODO: we should also check pointers for arrays to see if they have been remapped already. theoretically we could have two views pointing at the same data.
+            // TODO: we could use fancy pointers in dynamic array allocators to do cool stuff
             
-            array_info := type.(*Type_Info_Array);
+            array_data_offset: s64 = ---;
+            array_info := base_type.(*Type_Info_Array);
             if array_info.array_type != .FIXED {
-                raw_array := (*buffer.data[read_offset]).(*Resizable_Array);
+                raw_array := get_pointer_to_type(packer, read_offset, Resizable_Array);
+                array_data_offset = raw_array.data.(s64);
                 
-                // to be safe, make sure array has valid data and count before trying to unpack
-                // previously, we were writing invalid arrays (zero count, non-zero data offset) during packing and it was causing us to have weird behavior here when unpacking
-                if raw_array.data  == null  return true;
-                if raw_array.count == 0     return true;
-                
-                if raw_array.data.(u64) < 0 || raw_array.data.(u64) >= buffer.count.(u64) {
-                    print("Error while unpacking data for array.\n");
-                    log("raw_array: %", raw_array.*);
-                    log("path: %", debug_trace);
+                // To be safe, we make sure the array has valid data and count before trying to unpack it.
+                // Previously, we were writing invalid arrays (zero count, non-zero data offset)
+                // during packing and it was causing us to have weird behavior here when unpacking.
+                if (array_data_offset == 0) != (raw_array.count == 0) {
+                    trace := format_data_trace(data_node,, temp);
+                    log("%: Invalid array in unpack_data: data offset is %, but count is %.", trace, array_data_offset, raw_array.count);
                     return false;
                 }
-                array_data     = raw_array.data.(s64);
-                array_count    = raw_array.count;
-                raw_array.data = buffer.data + array_data;
+                
+                if array_data_offset < 0 || array_data_offset + raw_array.count > packer.buffer.count {
+                    trace := format_data_trace(data_node,, temp);
+                    log("%: Invalid array in unpack_data: data offset is % and count is %, but the buffer we are unpacking is only % bytes.", trace, array_data_offset, raw_array.count, packer.buffer.count);
+                    return false;
+                }
+                
+                if raw_array.data == null  return true;
+                
+                raw_array.data = packer.buffer.data + array_data_offset;
             } else {
-                array_data  = read_offset;
-                array_count = array_info.array_count;
+                array_data_offset = read_offset;
             }
             
-            elem_read_offset := array_data;
-            for 0..array_count-1 {
-                add_debug_trace("[%]", it);
-                if !recurse(array_info.element_type, buffer, elem_read_offset, unpacked_offsets) {
-                    print("Error while unpacking data for array.\n");
-                    return false;
-                }
-                elem_read_offset += array_info.element_type.runtime_size;
+            element_read_offset := array_data_offset;
+            for:elements data_node {
+                if !recurse(packer, it, element_read_offset)  return false;
+                element_read_offset += array_info.element_type.runtime_size;
             }
             
           case .STRING;
-            str := (*buffer.data[read_offset]).(*string);
-            assert(str.data.(u64) >= 0 && str.data.(u64) < buffer.count.(u64));
-            str.data = buffer.data + str.data.(s64);
+            // TODO: should check string data pointers with unpacked offsets as well.
+            pointer_to_string := get_pointer_to_type(packer, read_offset, string);
+            
+            string_data_offset := pointer_to_string.data.(s64);
+            if string_data_offset < 0 || string_data_offset + pointer_to_string.count > packer.buffer.count {
+                trace := format_data_trace(data_node,, temp);
+                log("%: Invalid string in unpack_data: data offset is % and count is %, but the buffer we are unpacking is only % bytes.", trace, string_data_offset, pointer_to_string.count, packer.buffer.count);
+                return false;
+            }
+            
+            pointer_to_string.data = packer.buffer.data + string_data_offset;
             
           case .POINTER;
-            ptr_ptr := (*buffer.data[read_offset]).(**void);
-            if ptr_ptr.* != null {
-                packed_ptr := ptr_ptr.(**void).*;
-                
-                // if is_local_data_pointer(packed_ptr) {
-                //     unpack_local_ptr := context.unpack_local_data_pointer;
-                //     if unpack_local_ptr == null {
-                //         log("Error: encountered a local data pointer, but context.unpack_local_data_pointer was null.");
-                //         return false;
-                //     }
-                    
-                //     pointer_to := type.(*Type_Info_Pointer).pointer_to;
-                //     local_data_ptr, ok := unpack_local_ptr(packed_ptr, pointer_to);
-                //     if !ok {
-                //         log("Error while trying to unpack local data pointer.");
-                //         return false;
-                //     }
-                    
-                //     ptr_ptr.* = local_data_ptr;
-                //     if local_data_ptrs then array_add(local_data_ptrs, local_data_ptr);
-                //     return true;
-                // }
+            pointer_to_pointer := get_pointer_to_type(packer, read_offset, *void);
+            
+            packed_pointer := pointer_to_pointer.*;
+            if packed_pointer != null {
+                // TODO: implement special pointer handling
                 
                 // overwrite offset with actual pointer
-                data_offset := packed_ptr.(s64) & Packed_Pointer_Masks.POINTER_DATA.(s64);
-                ptr_ptr.* = buffer.data + data_offset;
+                data_offset := packed_pointer.(s64) & Packed_Pointer_Masks.POINTER_DATA.(s64);
+                pointer_to_pointer.* = packer.buffer.data + data_offset;
                 
                 // after fixing the pointer itself, check if we need to unpack contents pointed to by pointer
                 // we will skip unpacking contents pointed to by pointer if we have already unpacked them prior
-                if array_find(unpacked_offsets.*, data_offset) then return true;
-                array_add(unpacked_offsets, data_offset);
+                for packer.packed_pointers if it.offset == data_offset then return true;
+                array_add(*packer.packed_pointers, .{ offset = data_offset });
                 
                 // maybe recast the pointer to a different type
                 // type info cases are built in and run first, then user cases are run
                 // NOTE: The type info recast here will only work when unpacking with type info that is not dynamically loaded.
                 //       So this will work when we are loading our type info file, but will not do anything when using the loaded type info to unpack a data file.
                 //       This should be fine, since your data file probably doesn't contain any pointers to type info, but if they do, note that this recast will not occur!
-                pointer_any, done := recast_type_info(Any.{ type, ptr_ptr });
-                // if !done {
-                //     for context.conversion_settings.pointer_recast_procs {
-                //         recast_ptr_any:, done = it.proc(.{ pointer_any, null, null }, it.data);
-                //         if done { pointer_any = recast_ptr_any; break; }
-                //     }
-                // }
-                // if pointer_any.type != type {
-                //     // print("recast a pointer: % -> %\n", (*type).(*Type).*, (*pointer_any.type).(*Type).*);
-                // }
+                pointer_any, done := recast_type_info(Any.{ base_type, pointer_to_pointer });
                 
-                type_pointed_to := pointer_any.type.(*Type_Info_Pointer).pointer_to;
-                if !recurse(type_pointed_to, buffer, data_offset, unpacked_offsets) {
-                    print("Error while unpacking data through pointer.\n");
-                    return false;
-                }
+                // NOTE: We override the type of dereferenced_data_node based on the recast done above.
+                dereferenced_data_node := dereference_pointer(data_node);
+                dereferenced_data_node.type = pointer_any.type.(*Type_Info_Pointer).pointer_to;
+                if !recurse(packer, dereferenced_data_node, data_offset)  return false;
             }
         }
         return true;
     }
     
-    unpacked_offsets: [..] s64;
-    defer array_free(unpacked_offsets);
+    packer: Data_Packer;
+    packer.buffer.data  = buffer.data;
+    packer.buffer.count = buffer.count;
+    defer array_free(packer.packed_pointers);
     
-    #if DEBUG  array_reset_keeping_memory(*debug_trace);
-    add_debug_trace("DATA");
+    assert(offset >= 0 && offset + type.runtime_size <= packer.buffer.count, "unpack_data called with invalid parameters: offset = %, type.runtime_size = %, packer.buffer.count = %", offset, type.runtime_size, packer.buffer.count);
+    data_node := Data_Node.{ 
+        kind = .NO_CONTEXT, 
+        name = debug_data_name, 
+        any = Any.{ type, packer.buffer.data + offset } 
+    };
     
-    if !recurse(type, buffer, starting_offset, *unpacked_offsets) {
-        return Any.{}, false;
-    }
-    
-    return Any.{ type, buffer.data + starting_offset }, true;
+    return data_node.any, recurse(*packer, *data_node, offset);
 }
 
 
@@ -476,8 +451,8 @@ unpack_data :: (type: *Type_Info, buffer: *[] u8, starting_offset := 0) -> (Any,
 // we give the callback the packed pointer and what it's a pointer to, and then the callback can figure out if it is able to resolve the pointer
 // this seems better than just using a blind lookup table, since we can consider the context of the type we are pointing to.
 // should be much easier for users to implement extended behaviour this way
-Pack\ _Local_Data_Pointer_Proc :: #type (ptr: *Data_Node) -> (*void, bool);
-Unpack_Local_Data_Pointer_Proc :: #type (packed_ptr: *void, pointer_to: *Type_Info) -> (*void, bool);
+Pack\ _Local_Data_Pointer_Proc :: #type (pointer: *Data_Node) -> (*void, bool);
+Unpack_Local_Data_Pointer_Proc :: #type (packed_pointer: *void, pointer_to: *Type_Info) -> (*void, bool);
 
 // when unpacking local data pointer, we will also want to override the type to match the internal ti, not whetever pointer_to says it is
 //      but really, we shouldn't even remap the data behind a local data pointer though, since presumably we just want the raw internal data pointer itself, not to remap from the internal data 
@@ -498,18 +473,18 @@ Packed_Pointer_Masks :: enum u64 #specified {
 }
 
 // should only be given a pointer in the packed encoding!
-is_local_data_pointer :: inline (ptr: *void) -> bool {
-    return ptr.(u64) & Packed_Pointer_Masks.LOCAL_DATA.(u64) != 0;
+is_local_data_pointer :: inline (pointer: *void) -> bool {
+    return pointer.(u64) & Packed_Pointer_Masks.LOCAL_DATA.(u64) != 0;
 }
 
 encode_local_data_pointer :: inline (ptr_data: u32, user_data: u16) -> *void {
     return (Packed_Pointer_Masks.LOCAL_DATA.(u64) | (user_data.(u64) << 32) | ptr_data.(u64)).(*void);
 }
 
-decode_local_data_pointer :: inline (ptr: *void) -> (ptr_data: u32, user_data: u16) {
+decode_local_data_pointer :: inline (pointer: *void) -> (ptr_data: u32, user_data: u16) {
     using Packed_Pointer_Masks;
-    assert(is_local_data_pointer(ptr));
-    return (ptr.(u64) & POINTER_DATA.(u64)).(u32), ((ptr.(u64) & USER.(u64)) >> 32).(u16);
+    assert(is_local_data_pointer(pointer));
+    return (pointer.(u64) & POINTER_DATA.(u64)).(u32), ((pointer.(u64) & USER.(u64)) >> 32).(u16);
 }
 
 
@@ -648,17 +623,4 @@ convert_type_info :Convert.User_Remap_Proc: (new_info_ptr: Any, old_info_ptr: An
     ok := Convert.any_to_any(new_info, old_info);
     return ifx ok then .HANDLED else .ERROR;
 }
-
-
-
-DEBUG :: true;
-
-#if DEBUG { debug_trace: [..] string; }
-
-add_debug_trace :: (format: string, args: ..Any) #expand {
-    #if DEBUG {
-        array_add(*debug_trace, tprint(format, ..args));
-        `defer pop(*debug_trace);
-    }
-} @PrintLike
 

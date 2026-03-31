@@ -119,7 +119,7 @@ unpack_type_info_with_header :: (_file: [] u8, base_type_info: *Type_Info = null
         base_type_info = get_base_type_info_for_jai_version(header.jai_compiler_version);
     }
     
-    info_any, ok := unpack_data(base_type_info, *file, starting_offset);
+    info_any, ok := unpack_data(base_type_info, file, starting_offset);
     if !ok  return null;
     
     // if we unpacked type info using old base type info, we need to remap to the new format
