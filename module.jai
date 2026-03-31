@@ -92,7 +92,7 @@ write_any :: inline (packer: *Data_Packer, offset: int, any: Any) {
 }
 
 get_pointer_to_type :: inline (packer: *Data_Packer, offset: int, $TYPE: Type) -> *TYPE {
-    assert(offset >= 0 && offset + size_of(TYPE) <= packer.buffer.count);
+    assert(offset >= 0 && offset + size_of(TYPE) <= packer.buffer.count, "offset: %, size: %, buffer count: %", offset, size_of(TYPE), packer.buffer.count);
     return (packer.buffer.data + offset).(*TYPE);
 }
 
@@ -179,14 +179,8 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
                 if struct_info.textual_flags & .UNION_IS_TAGGED {
                     member_data_node := get_valid_union_member(data_node);
                     if member_data_node {
-                        tag_any := get_union_tag(data_node.any);
-                        tag_data_node := Data_Node.{ 
-                            kind        = .STRUCT_MEMBER, 
-                            parent      = data_node, 
-                            any         = tag_any, 
-                            member_info = *struct_info.members[0],
-                        };
-                        if !recurse(packer, *tag_data_node, write_offset) {
+                        tag_node := get_union_tag(data_node);
+                        if !recurse(packer, tag_node, write_offset) {
                             return false;
                         }
                         
@@ -208,19 +202,15 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
             }
             
           case .ARRAY;
-            data_write_offset: s64   = ---;
-            array_data:        *void = ---;
-            array_count:       int   = ---;
+            data_write_offset: s64 = ---;
             
             array_info := base_type.(*Type_Info_Array);
             if array_info.array_type != .FIXED {
-                raw_array        := data_node.value_pointer.(*Resizable_Array).*;
-                array_data        = raw_array.data;
-                array_count       = raw_array.count;
+                raw_array := data_node.value_pointer.(*Resizable_Array).*;
                 
                 // when array count is 0, we don't want to set the array's data pointer
                 if raw_array.data == null || raw_array.count == 0 {
-                    raw_array = .{}; // just make it all zero'd to be safe
+                    raw_array = .{};
                 } else {
                     data_write_offset = get_bytes(packer, array_info.element_type.runtime_size * raw_array.count);
                     raw_array.data = data_write_offset.(*void);
@@ -229,19 +219,12 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
                 // NOTE: this memcpy is valid for both resizable and slice because we use data_node.type.runtime_size
                 write_bytes(packer, write_offset, *raw_array, data_node.type.runtime_size);
             } else {
-                array_data        = data_node.value_pointer;
-                array_count       = array_info.array_count;
                 data_write_offset = write_offset;
             }
             
-            element_any := Any.{ array_info.element_type, array_data };
-            for 0..array_count-1 {
-                element_data_node := Data_Node.{ kind = .ARRAY_INDEX, index = it, any = element_any, parent = data_node };
-                if !recurse(packer, *element_data_node, data_write_offset) {
-                    return false;
-                }
-                element_any.value_pointer += array_info.element_type.runtime_size;
-                data_write_offset         += array_info.element_type.runtime_size;
+            for:elements data_node {
+                if !recurse(packer, it, data_write_offset)  return false;
+                data_write_offset += array_info.element_type.runtime_size;
             }
             
           case .BOOL;    #through;
@@ -279,10 +262,9 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
                 pointer_offset = get_bytes(packer, type_pointed_to.runtime_size);
                 array_add(*packer.packed_pointers, .{ raw_pointer, pointer_offset });
                 
-                // current parent and struct member info passed through pointer dereference
-                // dereferenced_any := Any.{ type_pointed_to, raw_pointer };
-                // dereferenced_data_node := Data_Node.{ kind = .DEREFERENCE, any = dereferenced_any, parent = data_node };
+                // NOTE: We override the type of dereferenced_data_node based on the recast done above.
                 dereferenced_data_node := dereference_pointer(data_node);
+                dereferenced_data_node.type = type_pointed_to;
                 if !recurse(packer, dereferenced_data_node, pointer_offset) {
                     return false;
                 }
@@ -294,7 +276,11 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
     }
     
     write_offset := get_bytes(packer, any.type.runtime_size);
-    root_data_node := Data_Node.{ kind = .NO_CONTEXT, name = debug_data_name, any = any };
+    root_data_node := Data_Node.{ 
+        kind = .NO_CONTEXT, 
+        name = debug_data_name, 
+        any  = any 
+    };
     return recurse(packer, *root_data_node, write_offset), write_offset;
 }
 
@@ -341,7 +327,7 @@ unpack_data :: (type: *Type_Info, buffer: [] u8, offset: s64 = 0, debug_data_nam
             array_data_offset: s64 = ---;
             array_info := base_type.(*Type_Info_Array);
             if array_info.array_type != .FIXED {
-                raw_array := get_pointer_to_type(packer, read_offset, Resizable_Array);
+                raw_array := get_pointer_to_type(packer, read_offset, Array_View_64);
                 array_data_offset = raw_array.data.(s64);
                 
                 // To be safe, we make sure the array has valid data and count before trying to unpack it.
@@ -426,7 +412,7 @@ unpack_data :: (type: *Type_Info, buffer: [] u8, offset: s64 = 0, debug_data_nam
     data_node := Data_Node.{ 
         kind = .NO_CONTEXT, 
         name = debug_data_name, 
-        any = Any.{ type, packer.buffer.data + offset } 
+        any  = Any.{ type, packer.buffer.data + offset } 
     };
     
     return data_node.any, recurse(*packer, *data_node, offset);
