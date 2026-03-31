@@ -180,14 +180,10 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
                     member_data_node := get_valid_union_member(data_node);
                     if member_data_node {
                         tag_node := get_union_tag(data_node);
-                        if !recurse(packer, tag_node, write_offset) {
-                            return false;
-                        }
+                        if !recurse(packer, tag_node, write_offset)  return false;
                         
                         // write valid union member contents
-                        if !recurse(packer, member_data_node, write_offset + member_data_node.member_info.offset_in_bytes) {
-                            return false;
-                        }
+                        if !recurse(packer, member_data_node, write_offset + member_data_node.member_info.offset_in_bytes)  return false;
                     }
                 } else {
                     write_any(packer, write_offset, data_node.any);
@@ -196,9 +192,7 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
             }
             
             for:members data_node {
-                if !recurse(packer, it, write_offset + it.member_info.offset_in_bytes) {
-                    return false;
-                }
+                if !recurse(packer, it, write_offset + it.member_info.offset_in_bytes)  return false;
             }
             
           case .ARRAY;
@@ -265,9 +259,7 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
                 // NOTE: We override the type of dereferenced_data_node based on the recast done above.
                 dereferenced_data_node := dereference_pointer(data_node);
                 dereferenced_data_node.type = type_pointed_to;
-                if !recurse(packer, dereferenced_data_node, pointer_offset) {
-                    return false;
-                }
+                if !recurse(packer, dereferenced_data_node, pointer_offset)  return false;
             }
             write_any(packer, write_offset, pointer_offset);
         }
@@ -417,9 +409,6 @@ unpack_data :: (type: *Type_Info, buffer: [] u8, offset: s64 = 0, debug_data_nam
     
     return data_node.any, recurse(*packer, *data_node, offset);
 }
-
-
-// TODO: implement for realsies after figuring out type info versioning issue
 
 /*
     Packed Pointers
