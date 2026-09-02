@@ -58,11 +58,12 @@
 Pointer_And_Offset :: struct { pointer: *void; offset: s64; };
 
 Data_Packer :: struct {
-    type_table:         [] *Type_Info;
     buffer:             [..] u8;
     packed_pointers:    [..] Pointer_And_Offset;
-    // TODO: callbacks for recasting pointers and other context settings
+    type_table:         [..] *Type_Info;
+    table_of_contents:  [..] Table_Of_Contents_Entry;
     
+    // TODO: callbacks for recasting pointers and other context settings
     
     // TODO: use chunk system to replace point_and_offset
     //       should be able to have multiple pointers that just point into the same overall chunk
@@ -73,6 +74,12 @@ Data_Packer :: struct {
     //     pointer:    *void;
     //     offset:     s64;
     //     size:       s64;
+    // }
+    
+    // flags: Flags;
+    // Flags :: enum_flags {
+    //     DO_GENERATE_TABLE_OF_CONTENTS;
+    //     DO_GENERATE_TYPE_TABLE;
     // }
 }
 
@@ -146,11 +153,13 @@ unpack_file_with_type_info :: (file_path: string, info: *Type_Info, data: Any) -
 }
 
 
+
+
 // packs any data structure into a single binary blob and remaps pointers relative to start of buffer
 // TODO: use a dynamic array so that we don't have to actually realloc as often as we resize the buffer
 // TODO: could actually use a flat pool allocator, which would probably simplify code significantly (dont need buffer or write offset then)
 //       cannot use flat pool on the web though, so that doesn't help me much at the moment
-pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool, int {
+pack_data :: (packer: *Data_Packer, any: Any, id := "", omit_from_toc := false) -> bool, int {
     recurse :: (
         packer:        *Data_Packer,
         data_node:     *Data_Node,
@@ -244,13 +253,19 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
             }
             
             // maybe recast pointer to more specific type
-            pointer_any, done := recast_type_info(data_node.any);
+            pointer_any, is_pointer_to_type_info := recast_type_info(data_node.any);
             
-            // TODO: implement special pointer handling
+            // TODO: implement user hooks for special pointer handling
             
-            // dereference pointer and recurse, if data pointed at has not already been written
+            // Dereference the pointer and recurse, if the data being pointed at has not already been written.
             pointer_offset: s64 = -1;
-            for packer.packed_pointers  if it.pointer == raw_pointer { pointer_offset = it.offset; break; };
+            for packer.packed_pointers {
+                if it.pointer == raw_pointer { 
+                    pointer_offset = it.offset; 
+                    break; 
+                }
+            }
+            
             if pointer_offset == -1 {
                 type_pointed_to := pointer_any.type.(*Type_Info_Pointer).pointer_to;
                 pointer_offset = get_bytes(packer, type_pointed_to.runtime_size);
@@ -261,16 +276,44 @@ pack_data :: (packer: *Data_Packer, any: Any, debug_data_name := "data") -> bool
                 dereferenced_data_node.type = type_pointed_to;
                 if !recurse(packer, dereferenced_data_node, pointer_offset)  return false;
             }
+            
             write_any(packer, write_offset, pointer_offset);
+            
+            // TODO: Maybe we can just put this inside the above block, and not worry about the uniqueness check?
+            if is_pointer_to_type_info {
+                array_add_if_unique(*packer.type_table, xx raw_pointer);
+            }
         }
         
         return true;
     }
     
     write_offset := get_bytes(packer, any.type.runtime_size);
+    
+    if !omit_from_toc {
+        // if packer.flags & .DO_GENERATE_TABLE_OF_CONTENTS {
+            if !id {
+                assert(false, "Attempt to pack_data with empty id, while also writing a table of contents.");
+            }
+            
+            for toc_entry: packer.table_of_contents {
+                if toc_entry.id == id {
+                    assert(false, "Attempt to pack_data with duplicate id: '%'", id);
+                }
+            }
+            
+            type_index: int;
+            // if packer.flags & .DO_GENERATE_TYPE_TABLE {
+                _, type_index = array_add_if_unique(*packer.type_table, any.type);
+            // }
+            
+            array_add(*packer.table_of_contents, .{ id, xx type_index, xx write_offset });
+        // }
+    }
+    
     root_data_node := Data_Node.{ 
         kind = .NO_CONTEXT, 
-        name = debug_data_name, 
+        name = id, 
         any  = any 
     };
     return recurse(packer, *root_data_node, write_offset), write_offset;
@@ -468,12 +511,14 @@ decode_local_data_pointer :: inline (pointer: *void) -> (ptr_data: u32, user_dat
 
 #load "old_preload_versions.jai";
 #load "type_info.jai";
+#load "data_file.jai";
 
 #import "Basic";
-#import "File";     // TODO: remove
+#import "File";
 Compiler :: #import "Compiler";     // for is_subclass_of
 
-#import "Utils"; // TODO: remove array_find_where and remove dependency
+// TODO: Try to remove all of these dependencies!
+// #import "Utils"; // TODO: remove array_find_where and remove dependency
 using Reflect :: #import "Reflect";
 using Convert :: #import "Convert";
 
@@ -498,6 +543,24 @@ recast_type_info :: (any: Any) -> Any, bool {
     // Don't want to have to do this for every previous version of type info, so need to think of a better solution.
     // We should probably just implement some proc that adapts old type info binaries into the new format...
     {
+        using Preload_0_2_011;
+        if any.type == xx *Type_Info {
+            ti := any.value_pointer.(**Type_Info).*;
+            if ti.type == {
+                case .INTEGER;      return Any.{ xx *Type_Info_Integer,   any.value_pointer }, true;
+                case .FLOAT;        return Any.{ xx *Type_Info_Float,     any.value_pointer }, true;
+                case .STRING;       return Any.{ xx *Type_Info_String,    any.value_pointer }, true;
+                case .POINTER;      return Any.{ xx *Type_Info_Pointer,   any.value_pointer }, true;
+                case .PROCEDURE;    return Any.{ xx *Type_Info_Procedure, any.value_pointer }, true;
+                case .STRUCT;       return Any.{ xx *Type_Info_Struct,    any.value_pointer }, true;
+                case .ARRAY;        return Any.{ xx *Type_Info_Array,     any.value_pointer }, true;
+                case .ENUM;         return Any.{ xx *Type_Info_Enum,      any.value_pointer }, true;
+                case .VARIANT;      return Any.{ xx *Type_Info_Variant,   any.value_pointer }, true;
+            }
+        }
+    }
+    
+    {
         using Preload_0_2_012;
         if any.type == xx *Type_Info {
             ti := any.value_pointer.(**Type_Info).*;
@@ -516,7 +579,7 @@ recast_type_info :: (any: Any) -> Any, bool {
     }
     
     {
-        using Preload_0_2_024;
+        using Preload_0_2_025;
         if any.type == xx *Type_Info {
             ti := any.value_pointer.(**Type_Info).*;
             if ti.type == {
@@ -545,13 +608,16 @@ Convert_Type_Info_Callback_Data :: struct {
 }
 
 // TODO: figure out how to make allocations better here. going to just push temporary allocator in caller for now so that we don't have to worry about freeing the type info structure we create, since that could get ugly...
-convert_type_info :Convert.User_Remap_Proc: (new_info_ptr: Any, old_info_ptr: Any, user_data: *void) -> User_Remap_Proc_Result {
-    if new_info_ptr.type != xx *Type_Info then return .UNHANDLED;
+convert_type_info :Convert.User_Remap_Proc: (new_info_any: Any, old_info_any: Any, user_data: *void) -> User_Remap_Proc_Result {
+    if new_info_any.type != xx *Type_Info then return .UNHANDLED;
     
     using _user_data := user_data.(*Convert_Type_Info_Callback_Data);
     
+    old_info_ptr_ptr := old_info_any.value_pointer.(**Type_Info);
+    new_info_ptr_ptr := new_info_any.value_pointer.(**Type_Info);
+    
     // for now, we will presume that the very basic Type_Info struct in Preload.jai will never change, and we can always access the type tag.
-    type_info_tag := old_info_ptr.value_pointer.(**Type_Info).*.type;
+    type_info_tag := old_info_ptr_ptr.*.type;
     
     // the type info of the type info we want to create
     info_type: *Type_Info;
@@ -572,30 +638,29 @@ convert_type_info :Convert.User_Remap_Proc: (new_info_ptr: Any, old_info_ptr: An
     assert(info_type != null, "invalid type info tag: %", type_info_tag);
     
     // check if we've already converted this type info
-    found := array_find_where(
-        generated_type_infos, 
-        (it, old_info_ptr) => it.old_ptr == old_info_ptr, 
-        old_info_ptr.value_pointer.(**Type_Info).*
-    );
+    found: *type_of(generated_type_infos[0]);
+    for *generated_type_infos {
+        if it.old_ptr == old_info_ptr_ptr.* {
+            found = it;
+            break;
+        }
+    }
     if found {
-        new_info_ptr.value_pointer.(**Type_Info).* = found.new_ptr;
+        new_info_ptr_ptr.* = found.new_ptr;
         return .HANDLED;
     }
     
     // dynamically create a new type info structure for the proper type info subtype
-    // then assign the pointer to that type info back to new_info_ptr
-    new_info := New_Any(info_type);
-    new_info_ptr.value_pointer.(**Type_Info).* = new_info.value_pointer.(*Type_Info);
+    // then overwrite the type info pointer pointed to by new_info_any 
+    _new_info_any := New_Any(info_type);
+    new_info_ptr_ptr.* = _new_info_any.value_pointer.(*Type_Info);
     
-    array_add(*generated_type_infos, .{
-        old_info_ptr.value_pointer.(**Type_Info).*,
-        new_info_ptr.value_pointer.(**Type_Info).*
-    });
+    array_add(*generated_type_infos, .{ old_info_ptr_ptr.*, new_info_ptr_ptr.* });
     
-    _old_info_ptr := recast_type_info(old_info_ptr); 
-    old_info := dereference_any_pointer(_old_info_ptr);
+    _old_info_any := recast_type_info(old_info_any); 
+    _old_info_any  = dereference_any_pointer(_old_info_any);
     
-    ok := Convert.any_to_any(new_info, old_info);
+    ok := Convert.any_to_any(_new_info_any, _old_info_any);
     return ifx ok then .HANDLED else .ERROR;
 }
 
