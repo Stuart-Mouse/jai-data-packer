@@ -57,6 +57,7 @@
     - [X] create a proper data packer structure that we can use as a sort of context, need to pass fewer parameters as we recurse
     - [X] replace Any_With_Context with a more robust Data_Node system
     - [X] allow data packer to handle multiple calls to pack_data, create a directory of top-level data
+    - [ ] make packing of Anys work and add those types to the type table.
     - [ ] implement packed pointer stuff, and make an example of using packed pointers to encode procedure pointers and other constant data that can't be straightforwardly serialized.
     - [ ] implement data chunk stuff and write some basic test cases showing the why and how of it
 */

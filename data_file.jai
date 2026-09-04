@@ -110,12 +110,12 @@ get_table_of_contents :: (data_file: Data_File) -> [] Table_Of_Contents_Entry {
 load_data_file :: (path: string) -> (bool, Data_File) {
     file, ok := read_entire_file(path);
     if !ok {
-        log("Failed to load data file from path: % -- File not found.", path);
+        log("Failed to load data file: % -- File not found.", path);
         return false, .{};
     }
     
     if file.count < size_of(Data_File_Header_Base) {
-        log("Failed to load data file from path: % -- File is too short to read header.", path);
+        log("Failed to load data file: % -- File is too short to read header.", path);
         free(file);
         return false, .{};
     }
@@ -123,19 +123,19 @@ load_data_file :: (path: string) -> (bool, Data_File) {
     header := cast(*Data_File_Header_Base) file.data;
     
     if header.magic != DATA_FILE_HEADER_MAGIC {
-        log("Failed to load data file from path: % -- File magic was incorrect.", path);
+        log("Failed to load data file: % -- File magic was incorrect.", path);
         free(file);
         return false, .{};
     }
     
     if !is_valid_header_version(header.header_version) {
-        log("Failed to load data file from path: % -- Invalid header version: %", path, header.header_version.(u32));
+        log("Failed to load data file: % -- Invalid header version: %", path, header.header_version.(u32));
         free(file);
         return false, .{};
     }
     
     if file.count < get_size_of_header(header) {
-        log("Failed to load data file from path: % -- File is too short to read full % header.", path, header.header_version);
+        log("Failed to load data file: % -- File is too short to read full % header.", path, header.header_version);
         free(file);
         return false, .{};
     }
@@ -165,7 +165,7 @@ load_data_file :: (path: string) -> (bool, Data_File) {
         
         ok, type_table_any := unpack_data(*packer, *type_table_type_info, header.type_table_offset, "type_table");
         if !ok {
-            log("Failed to load data file from path: % -- Unable to unpack type table.", path);
+            log("Failed to load data file: % -- Unable to unpack type table.", path);
             return false, .{};
         }
         type_table = type_table_any.value_pointer.(*[]*Type_Info).*; // Maybe we should assert that this pointer matches what we would get from get_type_table?
@@ -179,17 +179,21 @@ load_data_file :: (path: string) -> (bool, Data_File) {
     
     if (flags & .CONTAINS_TABLE_OF_CONTENTS) {
         if !unpack_data(*packer, xx [] Table_Of_Contents_Entry, header.table_of_contents_offset, "table_of_contents") {
-            log("Failed to load data file from path: % -- Unable to unpack table of contents.", path);
+            log("Failed to load data file: % -- Unable to unpack table of contents.", path);
             return false, .{};
         }
         
         table_of_contents := get_table_of_contents(data_file);
         for toc_entry: table_of_contents {
-            type := type_table[toc_entry.type_index];
-            if !unpack_data(*packer, type, toc_entry.data_offset, toc_entry.id) {
-                log("Failed to load data file from path: % -- Unable to unpack entry '%'.", path, toc_entry.id);
+            if !unpack_data(*packer, type_table[toc_entry.type_index], toc_entry.data_offset, toc_entry.id) {
+                log("Failed to load data file: % -- Unable to unpack entry '%'.", path, toc_entry.id);
                 return false, .{};
             }
+        }
+    } else {
+        if !unpack_data(*packer, type_table[0], get_size_of_header(data_file)) {
+            log("Failed to load data file: % -- Unable to unpack data file contents.", path);
+            return false, .{};
         }
     }
     
@@ -296,7 +300,6 @@ get_content_as_any :: (data_file: Data_File, id := "") -> bool, Any {
         }
         
         type_table := get_type_table(data_file);
-        
         return true, Any.{
             type          = type_table[0],
             value_pointer = data_file.header.(*void) + get_size_of_header(data_file),
@@ -307,7 +310,6 @@ get_content_as_any :: (data_file: Data_File, id := "") -> bool, Any {
     table_of_contents := get_table_of_contents(data_file);
     for toc_entry: table_of_contents {
         if toc_entry.id == id {
-            // print_vars(toc_entry.id, toc_entry.data_offset, toc_entry.type_index);
             return true, Any.{
                 type          = type_table[toc_entry.type_index],
                 value_pointer = data_file.header.(*void) + toc_entry.data_offset,
