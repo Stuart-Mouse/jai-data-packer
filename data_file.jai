@@ -11,15 +11,16 @@
     but alas, it is necessary at the moment...
     
     NOTE: In the case that you elect not to include a table of contents, but do include type info, the root type info will always be the type at index 0.
+    
+    
+    TODO: Remove the need to explicitly write a table of contents and type table offset in header. 
+          Instead, we should just pack the data for those array views directly into the header.
+          This will reqiure altering pack_data so that we can explicitly pass a starting write offset, rather than using get_bytes.
 */
 
-// This is the structure we return to the user by pointer when we load a data file.
-// The file contents will be present directly after the header.
-// Having this be a distinct type means we can more easily define the user interface around it.
-// NOTE: I may need to turn this into a struct later if we end up altering the header format, since in that case, we would probably want to automatically remap to the latest header format...
-//       Also, we will actually want to rectify a lot of the file contents (pointers in the embedded type info and table of contents) before handing the Data_File back to the user...
 Data_File :: struct {
     using #as header:       *Data_File_Header_Base; // Header allocation includes entire file payload as well.
+    // total_file_size:        int;
     allocations_to_free:    [..] *void;
 }
 
@@ -38,7 +39,12 @@ Data_File_Header_Base :: struct {
     magic:                      u32;
     header_version:             Version;
     jai_compiler_version:       Compiler.Version_Info;
+    
+    // This is here for use by the user.
+    // I figured 4 billion is probably enough version numbers for most use cases.
     file_version:               u32;
+    
+    file_timestamp:             Apollo_Time;
     
     table_of_contents_offset:   u32;
     type_table_offset:          u32;
@@ -49,6 +55,7 @@ Data_File_Header_Base :: struct {
     }
 }
 
+// NOTE: This should always alias the latest version of the struct.
 Data_File_Header :: Data_File_Header_V1;
 
 // NOTE: When we have a need for changes to the header struct, we will need to duplicate this struct and version it.
@@ -59,7 +66,10 @@ Data_File_Header_V1 :: struct {
     //       The only reason I am not doing so now is to avoid the unlikely case that I end up making a breaking change in terms of how the flags are specified.
     flags:  Flags;
     
-    Flags :: enum_flags u32 #specified {
+    // Flags is a u64 because with flags you always want to have more.
+    // The more flags your entities have, the better your game is.
+    // The same is also true for data formats. More flags means more better.
+    Flags :: enum_flags u64 #specified {
         CONTAINS_TYPE_INFO              :: 1 << 0;
         CONTAINS_TABLE_OF_CONTENTS      :: 1 << 1;
         
@@ -97,7 +107,6 @@ get_table_of_contents :: (data_file: Data_File) -> [] Table_Of_Contents_Entry {
     return pointer.(*[]Table_Of_Contents_Entry).*;
 }
 
-// NOTE: Returns null on failure.
 load_data_file :: (path: string) -> (bool, Data_File) {
     file, ok := read_entire_file(path);
     if !ok {
@@ -137,6 +146,8 @@ load_data_file :: (path: string) -> (bool, Data_File) {
     assert(header.header_version >= .V1);
     flags := header.(*Data_File_Header).flags;
     
+    // log("Loading Data_File with timestamp: %", calendar_to_string(to_calendar(header.file_timestamp)));
+    
     packer: Data_Packer;
     init_packer_for_unpacking(*packer, xx file);
     defer deinit_packer(*packer);
@@ -153,7 +164,10 @@ load_data_file :: (path: string) -> (bool, Data_File) {
         };
         
         ok, type_table_any := unpack_data(*packer, *type_table_type_info, header.type_table_offset, "type_table");
-        // TODO: report error if not ok
+        if !ok {
+            log("Failed to load data file from path: % -- Unable to unpack type table.", path);
+            return false, .{};
+        }
         type_table = type_table_any.value_pointer.(*[]*Type_Info).*; // Maybe we should assert that this pointer matches what we would get from get_type_table?
         
         if base_type_info != type_info(*Type_Info) {
@@ -164,13 +178,18 @@ load_data_file :: (path: string) -> (bool, Data_File) {
     }
     
     if (flags & .CONTAINS_TABLE_OF_CONTENTS) {
-        _, ok := unpack_data(*packer, xx [] Table_Of_Contents_Entry, header.table_of_contents_offset, "table_of_contents");
+        if !unpack_data(*packer, xx [] Table_Of_Contents_Entry, header.table_of_contents_offset, "table_of_contents") {
+            log("Failed to load data file from path: % -- Unable to unpack table of contents.", path);
+            return false, .{};
+        }
         
         table_of_contents := get_table_of_contents(data_file);
         for toc_entry: table_of_contents {
             type := type_table[toc_entry.type_index];
-            _, ok := unpack_data(*packer, type, toc_entry.data_offset, toc_entry.id);
-            // TODO: report error if not ok
+            if !unpack_data(*packer, type, toc_entry.data_offset, toc_entry.id) {
+                log("Failed to load data file from path: % -- Unable to unpack entry '%'.", path, toc_entry.id);
+                return false, .{};
+            }
         }
     }
     
@@ -202,34 +221,51 @@ write_data_file :: (packer: *Data_Packer, path: string, root_type: *Type_Info = 
         header.flags |= .CONTAINS_TABLE_OF_CONTENTS;
         
         ok, offset := pack_data(packer, packer.table_of_contents, omit_from_toc = true);
-        // TODO: if !ok
+        if !ok {
+            log("Failed to write data file to path: % -- Unable to pack table of contents.", path);
+            return false;
+        }
         header.table_of_contents_offset = xx offset;
     }
     
-    // if include_type_info {
-        header.flags |= .CONTAINS_TYPE_INFO;
+    if root_type != null {
+        if packer.table_of_contents {
+            log("Failed to write data file to path: % -- A root_type was passed to write_data_file, but the packer contains a table of contents. This is not permitted.", path);
+            return false;
+        }
         
-        // TODO: handle root type thing
+        // The root type must be the first element in the type table in case there is no table of contents.
+        array_insert_at(*packer.type_table, root_type, 0);
+    }
+    
+    if packer.type_table {
+        header.flags |= .CONTAINS_TYPE_INFO;
         
         // Before writing the type table itself, we want to write whatever type infos are already contained within it individually.
         // This is because in the process of doing so, we will discover the rest of the type infos that were not already in our table, and they will get added to it.
-        // Then, and only then, can we write the table itself.
-        
+        // Then and only then can we write the table itself.
         type_table_view: [] *Type_Info = packer.type_table;
         for type_table_view {
-            ok := pack_data(packer, it, omit_from_toc = true);
-            // TODO: if !ok
+            if !pack_data(packer, it, omit_from_toc = true) {
+                log("Failed to write data file to path: % -- Unable to pack type info.", path);
+                return false; 
+            }
         }
         type_table_view = packer.type_table;
         
         ok, offset := pack_data(packer, type_table_view, omit_from_toc = true);
-        // TODO: if !ok report an error
+        if !ok {
+            log("Failed to write data file to path: % -- Unable to pack type table.", path);
+            return false;
+        }
         header.type_table_offset = xx offset;
         
-        // Sanity check that writing the table itself did not cause more type infos to be found.
+        // Sanity check that writing the type table itself did not cause more type infos to be found.
         assert(packer.type_table.count == type_table_view.count, "% != %", packer.type_table.count, type_table_view.count);
-    // }
+    }
     
+    header.file_timestamp = current_time_consensus();
+    // log("Writing Data_File with timestamp: %", calendar_to_string(to_calendar(header.file_timestamp)));
     packer.buffer.data.(*Data_File_Header).* = header;
     
     write_entire_file(path, packer.buffer.(string));
@@ -281,13 +317,10 @@ get_content_as_any :: (data_file: Data_File, id := "") -> bool, Any {
     return false, Any.{};
 }
 
-#import "Print_Vars";
-
-
-
-
 
 #scope_module
+
+// #import "Print_Vars";
 
 DATA_FILE_HEADER_MAGIC       :: 0xDA7A_DA7A;
 CURRENT_JAI_COMPILER_VERSION :: #run get_current_jai_compiler_version();

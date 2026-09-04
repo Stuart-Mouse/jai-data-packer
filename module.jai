@@ -29,10 +29,36 @@
     This is also an easy way to shift to/from a more purpose-built file format from/to the data packer.
     
     
+    Some notes about the design and implementation:
+    
+    Why use Jai's type info structures instead of a more minimal custom format?
+    It is true that Jai's type info structures contain quite a bit of information that we really do not need in order to perform the relatively simple job of packing and unpacking inary data.
+    However, by using standard Jai type infos, we gain the benefit of being able to easily return to a user an Any that they can immediately use just as they would any other Any.
+    Users can use all of the same reflection functionality to process their data files that they can use in other contexts.
+    
+    Now, there are some drawback sthat I till need to address.
+    Primarily, I want to add flags to strip things like constant_storage from type info, since this could end up being a quite large amount of data.
+    
+    The data packer is limited to file sizes of 4 gigabytes because we use only 32 bits for storing data offsets.
+    I chose to accept this limitation because frankly that seemed like plenty of space, and it affords us an addtional 32 bits in our packed pointers to do interesting and useful things.
+    
+    The ideal for loading serialized data from a file is to simply copy the contents of the file directly into memory.
+    For example, we have a file whose binary layout perfectly matches the struct that holds that data at runtime.
+    The data packer gets pretty close to this in ideal circumstances.
+    If you are using the data packer to store simple structs with only basic member types (primitives and fixed-size arrays),
+    then you are only paying for the additional cost of scanning over the data structure in order to check for pointers that need to be remapped.
+    This is not a non-zero cost, but it is minimal. 
+    (And perhaps later on we could further reduce it, by pre-checking type infos for structs to see if they are trivially copyable.)
+    
+    
+    
+    
     REFACTORING TODO:
     - [X] create a proper data packer structure that we can use as a sort of context, need to pass fewer parameters as we recurse
     - [X] replace Any_With_Context with a more robust Data_Node system
     - [X] allow data packer to handle multiple calls to pack_data, create a directory of top-level data
+    - [ ] implement packed pointer stuff, and make an example of using packed pointers to encode procedure pointers and other constant data that can't be straightforwardly serialized.
+    - [ ] implement data chunk stuff and write some basic test cases showing the why and how of it
 */
 
 #assert(size_of(*void) == size_of(s64));
