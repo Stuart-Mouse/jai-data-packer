@@ -133,9 +133,9 @@ unpack_type_info_with_header :: (_file: [] u8, base_type_info: *Type_Info = null
     // then we need to now remap those type info structures to the latest version.
     // For now, I am just allocating with temp, but it would ultimately be better to give the caller control over this.
     if base_type_info != xx *Type_Info {
-        allocations: [..] *void;
-        info = convert_type_info_to_latest_structure(info, compiler_version, *allocations,, temp);
-        log("allocations: %", allocations);
+        // allocations: [..] *void;
+        info = convert_type_info_to_latest_structure(info, compiler_version, null,, temp);
+        // log("allocations: %", allocations);
     }
     
     return info;
