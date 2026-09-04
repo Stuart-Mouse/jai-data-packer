@@ -187,10 +187,10 @@ get_current_jai_compiler_version :: () -> Compiler.Version_Info #compile_time {
     
     NOTE: This procedure will modify type infos in place when possible, so it is critical that you only call this on dynamically loaded type infos, not those stored in read-only data by the compiler.
 */
-convert_type_info_to_latest_structure :: (info: *Type_Info, jai_compiler_version: Compiler.Version_Info, allocations_to_free: *[..] *void) -> *Type_Info {
+convert_type_info_to_latest_structure :: (info: *Type_Info, jai_compiler_version: Compiler.Version_Info, allocations: *[..] *void) -> *Type_Info {
     __New :: ($T: Type) -> *T  #expand {
         new := New(T);
-        if allocations_to_free then array_add(allocations_to_free, new);
+        if allocations then array_add(allocations, new);
         return new;
     }
     
@@ -256,38 +256,38 @@ convert_type_info_to_latest_structure :: (info: *Type_Info, jai_compiler_version
         //       Most likely, we will need separate logic to remap the Type_Info_Struct_Member itself, and then remap the type info it points to.
         
         for *member_info: info_struct.parameters {
-            member_info.type = convert_type_info_to_latest_structure(member_info.type, jai_compiler_version, allocations_to_free);
+            member_info.type = convert_type_info_to_latest_structure(member_info.type, jai_compiler_version, allocations);
         }
         for *member_info: info_struct.specified_parameters {
-            member_info.type = convert_type_info_to_latest_structure(member_info.type, jai_compiler_version, allocations_to_free);
+            member_info.type = convert_type_info_to_latest_structure(member_info.type, jai_compiler_version, allocations);
         }
         for *member_info: info_struct.parameters {
-            member_info.type = convert_type_info_to_latest_structure(member_info.type, jai_compiler_version, allocations_to_free);
+            member_info.type = convert_type_info_to_latest_structure(member_info.type, jai_compiler_version, allocations);
         }
         
         if info_struct.polymorph_source_struct {
-            info_struct.polymorph_source_struct = xx convert_type_info_to_latest_structure(info_struct.polymorph_source_struct, jai_compiler_version, allocations_to_free);
+            info_struct.polymorph_source_struct = xx convert_type_info_to_latest_structure(info_struct.polymorph_source_struct, jai_compiler_version, allocations);
         }
         
       case .POINTER;
         info_pointer := info.(*Type_Info_Pointer);
         
-        info_pointer.pointer_to = convert_type_info_to_latest_structure(info_pointer.pointer_to, jai_compiler_version, allocations_to_free);
+        info_pointer.pointer_to = convert_type_info_to_latest_structure(info_pointer.pointer_to, jai_compiler_version, allocations);
         
       case .PROCEDURE;
         info_procedure := info.(*Type_Info_Procedure);
         
         for *argument_type: info_procedure.argument_types {
-            argument_type.* = convert_type_info_to_latest_structure(argument_type.*, jai_compiler_version, allocations_to_free);
+            argument_type.* = convert_type_info_to_latest_structure(argument_type.*, jai_compiler_version, allocations);
         }
         for *return_type: info_procedure.return_types {
-            return_type.* = convert_type_info_to_latest_structure(return_type.*, jai_compiler_version, allocations_to_free);
+            return_type.* = convert_type_info_to_latest_structure(return_type.*, jai_compiler_version, allocations);
         }
         
       case .ARRAY;
         info_array := info.(*Type_Info_Array);
         
-        info_array.element_type = convert_type_info_to_latest_structure(info_array.element_type, jai_compiler_version, allocations_to_free);
+        info_array.element_type = convert_type_info_to_latest_structure(info_array.element_type, jai_compiler_version, allocations);
         
       case .ENUM;
         // NOTE: If Type_Info_Integer changes, we will need to recurse here for internal_type.
@@ -295,7 +295,7 @@ convert_type_info_to_latest_structure :: (info: *Type_Info, jai_compiler_version
       case .VARIANT;
         info_variant := info.(*Type_Info_Variant);
         
-        info_variant.variant_of = convert_type_info_to_latest_structure(info_variant.variant_of, jai_compiler_version, allocations_to_free);
+        info_variant.variant_of = convert_type_info_to_latest_structure(info_variant.variant_of, jai_compiler_version, allocations);
         
     }
     

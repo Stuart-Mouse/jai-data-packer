@@ -20,18 +20,16 @@
 //       Also, we will actually want to rectify a lot of the file contents (pointers in the embedded type info and table of contents) before handing the Data_File back to the user...
 Data_File :: struct {
     using #as header:       *Data_File_Header_Base; // Header allocation includes entire file payload as well.
-    
-    // TODO: after refactoring how type info remapping is done, we should instead modify the typ einfo table in place and only use this additional array for type_infos_to_free
-    remapped_type_infos:    [] *Type_Info;          // All of these need to be freed individually if present.
+    allocations_to_free:    [..] *void;
 }
 
 free :: (data_file: Data_File) {
     free(data_file.header);
-    if data_file.remapped_type_infos {
-        for data_file.remapped_type_infos {
+    if data_file.allocations_to_free {
+        for data_file.allocations_to_free {
             free(it);
         }
-        array_free(data_file.remapped_type_infos);
+        array_free(data_file.allocations_to_free);
     }
 }
 
@@ -90,8 +88,6 @@ get_pointer_to_data_blob :: (data_file: Data_File) -> *void {
 }
 
 get_type_table :: (data_file: Data_File) -> [] *Type_Info {
-    if data_file.remapped_type_infos  return data_file.remapped_type_infos;
-    
     pointer := data_file.header.(*void) + data_file.header.type_table_offset;
     return pointer.(*[]*Type_Info).*;
 }
@@ -138,47 +134,43 @@ load_data_file :: (path: string) -> (bool, Data_File) {
     data_file: Data_File;
     data_file.header = header;
     
-    // TODO: unpack type info structures
-    
     assert(header.header_version >= .V1);
     flags := header.(*Data_File_Header).flags;
     
+    packer: Data_Packer;
+    init_packer_for_unpacking(*packer, xx file);
+    defer deinit_packer(*packer);
+    
     type_table: [] *Type_Info;
     if (flags & .CONTAINS_TYPE_INFO) {
-        // type_table := get_type_table(data_file);
-        
-        log("header.type_table_offset: %", header.type_table_offset);
-        _, ok := unpack_data(xx [] *Type_Info, xx file, header.type_table_offset, "type_table");
-        
-        // TODO: Rectify type infos to use latest structure if need be.
-        //       I'd like to actually write a conversion procedure that doesn't use the Convert module this time.
-        //       Until then, just assert that we are using the latest version.
         base_type_info := get_base_type_info_for_jai_version(data_file.header.jai_compiler_version);
-        if base_type_info != type_info(*Type_Info) {
-            log("Failed to load data file from path: % -- Failed while trying to unpack type table.", path);
-            free(file);
-            return false, .{};
-        }
         
-        type_table = get_type_table(data_file);
-    }
-    
-    log("type_table [%]:", type_table.count);
-    for type_table {
-        log("\t%", (*it).(*Type).*);
+        type_table_type_info := Type_Info_Array.{
+            type         = .ARRAY,
+            runtime_size = size_of(Array_View_64),
+            array_type   = .VIEW,
+            element_type = base_type_info,
+        };
+        
+        ok, type_table_any := unpack_data(*packer, *type_table_type_info, header.type_table_offset, "type_table");
+        // TODO: report error if not ok
+        type_table = type_table_any.value_pointer.(*[]*Type_Info).*; // Maybe we should assert that this pointer matches what we would get from get_type_table?
+        
+        if base_type_info != type_info(*Type_Info) {
+            for *info: type_table {
+                info.* = convert_type_info_to_latest_structure(info.*, data_file.header.jai_compiler_version, *data_file.allocations_to_free);
+            }
+        }
     }
     
     if (flags & .CONTAINS_TABLE_OF_CONTENTS) {
-        log("header.table_of_contents_offset: %", header.table_of_contents_offset);
-        _, ok := unpack_data(xx [] Table_Of_Contents_Entry, xx file, header.table_of_contents_offset, "table_of_contents");
+        _, ok := unpack_data(*packer, xx [] Table_Of_Contents_Entry, header.table_of_contents_offset, "table_of_contents");
         
-        log("table of contents:");
         table_of_contents := get_table_of_contents(data_file);
         for toc_entry: table_of_contents {
             type := type_table[toc_entry.type_index];
-            // _, ok := unpack_data(type, xx file, toc_entry.data_offset, toc_entry.id);
-            
-            log("\t%: % @ %", toc_entry.id, (*type).(*Type).*, toc_entry.data_offset);
+            _, ok := unpack_data(*packer, type, toc_entry.data_offset, toc_entry.id);
+            // TODO: report error if not ok
         }
     }
     
@@ -206,7 +198,6 @@ write_data_file :: (packer: *Data_Packer, path: string, root_type: *Type_Info = 
     assert(header.magic == DATA_FILE_HEADER_MAGIC, "Unable to write data file from packer that was not initialized with a valid data file header!");
     // Maybe should also check version is latest?
     
-    // if packer.flags & .SHOULD_WRITE_TABLE_OF_CONTENTS {
     if packer.table_of_contents {
         header.flags |= .CONTAINS_TABLE_OF_CONTENTS;
         
@@ -232,7 +223,7 @@ write_data_file :: (packer: *Data_Packer, path: string, root_type: *Type_Info = 
         type_table_view = packer.type_table;
         
         ok, offset := pack_data(packer, type_table_view, omit_from_toc = true);
-        // TODO: if !ok
+        // TODO: if !ok report an error
         header.type_table_offset = xx offset;
         
         // Sanity check that writing the table itself did not cause more type infos to be found.
@@ -280,7 +271,7 @@ get_content_as_any :: (data_file: Data_File, id := "") -> bool, Any {
     table_of_contents := get_table_of_contents(data_file);
     for toc_entry: table_of_contents {
         if toc_entry.id == id {
-            print_vars(toc_entry.id, toc_entry.data_offset, toc_entry.type_index);
+            // print_vars(toc_entry.id, toc_entry.data_offset, toc_entry.type_index);
             return true, Any.{
                 type          = type_table[toc_entry.type_index],
                 value_pointer = data_file.header.(*void) + toc_entry.data_offset,
