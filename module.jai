@@ -89,7 +89,9 @@ Data_Packer :: struct {
 // NOTE: returns offset into buffer instead of *void, since we may realloc the buffer at any time
 get_bytes :: (packer: *Data_Packer, count: int) -> int {
     count_before := packer.buffer.count;
-    array_resize(*packer.buffer, count_before + count);
+    if count != 0 {
+        array_resize(*packer.buffer, count_before + count);
+    }
     return count_before;
 }
 
@@ -194,15 +196,23 @@ pack_data :: (packer: *Data_Packer, any: Any, id := "", omit_from_toc := false) 
         
         base_type := Reflect.get_variant_base_type(data_node.type);
         if base_type.type == {
-          // case .ANY;
-          //   any := src.value_pointer.(*Any).*;
+          case .ANY;
+            any := data_node.value_pointer.(*Any).*;
             
-          //   if !recurse(.{ any.type,          src, null }, buffer, write_offset,     packed_pointers)  return false;
-          //   if !recurse(.{ any.value_pointer, src, null }, buffer, write_offset + 8, packed_pointers)  return false;
+            type_node := Reflect.make_data_node("", any.type, .STRUCT_MEMBER, data_node);
+            type_node.member_info = *type_info(Any_Struct).members[0];
+            if !recurse(packer, *type_node, write_offset)  return false;
             
-          //   data_write_offset := buffer.count;
-          //   array_resize(buffer, buffer.count + any.type.runtime_size);
-          //   return recurse(.{ any, src, null }, buffer, data_write_offset, packed_pointers);
+            // One slight drawback of this approach to writing the value pointer is that we don't get a clear data node showing the cast that is being done.
+            // We could maybe add a little hack to make that work, but perhaps it is not really that worthwhile.
+            
+            pointer_info := Reflect.make_pointer_type_info(any.type);
+            value_pointer_node := Reflect.make_data_node("", Any.{ *pointer_info, *any.value_pointer }, .STRUCT_MEMBER, data_node);
+            value_pointer_node.member_info = *type_info(Any_Struct).members[1];
+            
+            if !recurse(packer, *value_pointer_node, write_offset + 8)  return false;
+            
+            
             
           case .STRUCT;
             struct_info := base_type.(*Type_Info_Struct);
@@ -275,6 +285,14 @@ pack_data :: (packer: *Data_Packer, any: Any, id := "", omit_from_toc := false) 
                 return true;
             }
             
+            // TODO: For now, I don't have any special handling for other zero-sized types. Just another fun edge case to consider...
+            // Also need to consider how to handle pointer aliasing where the pointers are different types.
+            if data_node.type.type == .VOID {
+                pointer_offset := 0;
+                write_any(packer, write_offset, pointer_offset);
+                return true;
+            }
+            
             // maybe recast pointer to more specific type
             pointer_any, is_pointer_to_type_info := recast_type_info(data_node.any);
             
@@ -291,12 +309,14 @@ pack_data :: (packer: *Data_Packer, any: Any, id := "", omit_from_toc := false) 
             
             if pointer_offset == -1 {
                 type_pointed_to := pointer_any.type.(*Type_Info_Pointer).pointer_to;
+                
                 pointer_offset = get_bytes(packer, type_pointed_to.runtime_size);
                 array_add(*packer.packed_pointers, .{ raw_pointer, pointer_offset });
                 
                 // NOTE: We override the type of dereferenced_data_node based on the recast done above.
                 dereferenced_data_node := Reflect.dereference_pointer(data_node);
                 dereferenced_data_node.type = type_pointed_to;
+                
                 if !recurse(packer, dereferenced_data_node, pointer_offset)  return false;
             }
             
@@ -354,10 +374,17 @@ unpack_data :: (packer: *Data_Packer, type: *Type_Info, offset: s64 = 0, id := "
         
         base_type := Reflect.get_variant_base_type(data_node.type);
         if base_type.type == {
-          // case .ANY;
-            // any := (*buffer.data[read_offset]).(*string);
-            // assert(str.data.(u64) >= 0 && str.data.(u64) < buffer.count.(u64));
-            // str.data = buffer.data + str.data.(s64);
+          case .ANY;
+            pointer_to_any := data_node.value_pointer.(*Any_Struct);
+            
+            type_node := Reflect.make_data_node("", pointer_to_any.type, .STRUCT_MEMBER, data_node);
+            type_node.member_info = *type_info(Any_Struct).members[0];
+            if !recurse(packer, *type_node, read_offset)  return false;
+            
+            pointer_info := Reflect.make_pointer_type_info(pointer_to_any.type);
+            value_pointer_node := Reflect.make_data_node("", Any.{ *pointer_info, *pointer_to_any.value_pointer }, .STRUCT_MEMBER, data_node);
+            value_pointer_node.member_info = *type_info(Any_Struct).members[1];
+            if !recurse(packer, *value_pointer_node, read_offset + 8)  return false;
             
           case .STRUCT;
             struct_info := base_type.(*Type_Info_Struct);
@@ -460,6 +487,7 @@ unpack_data :: (packer: *Data_Packer, type: *Type_Info, offset: s64 = 0, id := "
                 if !recurse(packer, dereferenced_data_node, data_offset)  return false;
             }
         }
+        
         return true;
     }
     
